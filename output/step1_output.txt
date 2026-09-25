@@ -1,0 +1,150 @@
+ML Challenge 2026 -- Step 1 data checks
+
+=== (a) Row counts: pandas vs. raw line counts ===
+  train_source1: raw_lines=2206822 (incl. header), raw_data_rows=2206821, pandas_rows=2206821 [OK]
+  train_source2: raw_lines=5034617 (incl. header), raw_data_rows=5034616, pandas_rows=5034616 [OK]
+  train_source3: raw_lines=5285604 (incl. header), raw_data_rows=5285603, pandas_rows=5285603 [OK]
+  test_source1: raw_lines=1732545 (incl. header), raw_data_rows=1732544, pandas_rows=1732544 [OK]
+  test_source2: raw_lines=4887274 (incl. header), raw_data_rows=4887273, pandas_rows=4887273 [OK]
+  test_source3: raw_lines=5082317 (incl. header), raw_data_rows=5082316, pandas_rows=5082316 [OK]
+  train_ground_truth: raw_lines=2206822 (incl. header), raw_data_rows=2206821, pandas_rows=2206821 [OK]
+
+=== (b) Country label counts ===
+  train_source1: {'US': 1323633, 'India': 883188}
+  train_source2: {'India': 2017799, 'US': 3016817}
+  train_source3: {'US': 3170056, 'India': 2115547}
+  test_source1: {'US': 663106, 'France': 259452, 'India': 809986}
+    -> train countries seen: ['India', 'US']
+    -> test_source1 rows with a country unseen in train: 259452/1732544 (14.98%)
+  test_source2: {'India': 2312565, 'France': 703378, 'US': 1871330}
+  test_source3: {'India': 2405000, 'France': 731615, 'US': 1945701}
+
+=== (g) Empty name/address counts ===
+  train_source1: empty_name=0/2206821, empty_address=0/2206821
+  train_source2: empty_name=0/5034616, empty_address=168967/5034616
+  train_source3: empty_name=0/5285603, empty_address=175916/5285603
+  test_source1: empty_name=0/1732544, empty_address=0/1732544
+  test_source2: empty_name=0/4887273, empty_address=129408/4887273
+  test_source3: empty_name=0/5082316, empty_address=136098/5082316
+
+=== (h) Source2+3 records per Source1 record ===
+  train: S1=2206821, S2=5034616, S3=5285603, (S2+S3)/S1=4.677
+  test: S1=1732544, S2=4887273, S3=5082316, (S2+S3)/S1=5.754
+
+=== (c) Singleton rate / matches-per-entity / S2 vs S3 share ===
+  total S1 entities (train): 2206821
+  singleton rate: 123247/2206821 (5.58%)
+  matches-per-entity distribution (n_matches: n_entities):
+    0: 123247
+    1: 119157
+    2: 375212
+    3: 530841
+    4: 484115
+    5: 321957
+    6: 164868
+    7: 63968
+    8: 18680
+    9: 4205
+    10: 534
+    11: 37
+  matched-id instances: S2=3693619 (48.36%), S3=3944746 (51.64%)
+
+Building id->country lookups for train source1/2/3 ...
+
+=== (d) Exclusivity: S2/S3 ids matched to more than one S1 ===
+  0 S2/S3 id(s) matched to more than one S1 entity (out of 7638365 distinct matched ids).
+
+=== (e) Distractors and GT ids missing from files ===
+  matched S2 ids not found in train_source2.tsv: 0
+  matched S3 ids not found in train_source3.tsv: 0
+  S2 distractors (no S1 match): 1340997/5034616 (26.64%)
+  S3 distractors (no S1 match): 1340857/5285603 (25.37%)
+
+=== (f) Country mismatches on matched pairs ===
+  compared pairs: 7638365, mismatched country: 0 (0.00%), skipped (missing id/country): 0
+
+Building text lookups for the sample pairs ...
+
+=== (i) 15 random matched pairs, side by side ===
+  S1 S1-676510511: 'Greene Cascade Mines LLC' | '605 18th Street, IL, Silvis'
+    -> S2-726436961: 'Greene Mines LLC  Services' | 'SILVIS, 605 18TH STREET, IL'
+  S1 S1-833317129: 'Ultra Fashion Ltd' | 'C/O Pramod Kumar Sah, Sah Bhawan Pandasarai, Gumati, Laheriasairai, Darbhanga, Bihar'
+    -> S2-814604168: 'Ultra Fashion (Ltd.)' | 'Bihar, C/O PRAMOD KUMAR SAH, SAH BHAWAN PANRASARAI, GUMATI, LAHERIASAIRAI, DARBHANGA'
+    -> S2-542748888: 'Ultra Ultra Fashion Limited' | 'C/O PRAMOD KUMAR SAH, SAH BHAWAN PANDASARAI, GUMATI, LAHERIASAIRAI, DARBHANGA, Bihar'
+    -> S3-416703384: 'Ultra Ltd Fashion' | 'Door No 33 C/o Pramod Kumar Sah, Sah Bhawan Pandasarai, Gumati, Laheriasairai, Tiruchirapalli, Darbhanga, बिहार'
+  S1 S1-882899399: 'Vanmatre, Ruiz and Leary Insight' | '23 Birch Court, Mundelein, IL'
+    -> S2-733058114: 'Vanmatre, Ruiz and Leary Ínsight' | '23- BIRCH CT, MUNDELEIN, IL'
+    -> S2-991016587: 'Vanmatre, Ruiz and Leary Insight Corporation' | '23- BIRCH CT, MUNDELEIN, IL'
+    -> S2-56775330: 'Vanmatre, Ruiz and Leary (Center)' | ''
+    -> S3-615585429: 'Vanmatre, Ruiz-And Leary Insight' | '23-27 Birch Ct, Mundelein, Illinois'
+    -> S3-912715214: 'Vanmatre, Ruiz-and Leary Insight' | '23-27 Birch Ct, Mundelein, Illinois'
+    -> S3-824590483: 'Vanmatre,-Rziu and Leary Insight' | '23-27 Birch Court, Mundelein, Illinois'
+    -> S3-96912082: 'Vanmatre,-Ruiz And' | '23-27 Birch Ct, Mundelein, Illinois'
+  S1 S1-122074046: 'Vision Center LP' | '63 Drumlin Road, Newton, MA'
+    -> S2-241866949: 'Vision Center  LP' | '63 DRUMLIN RD, NEWTON, MA'
+    -> S3-743751772: 'Vision Center (LP)' | '63 Drumlin Rd, Newton, Massachusetts'
+    -> S3-469204607: 'Vision Center' | 'Massachusetts, 63 Drumlin Rd, Newton'
+  S1 S1-346079206: 'Team Advisors Private Limited' | 'Flat No 603 Bldg No I, Wing Phase 2 Bhoomi Acres Waghbill G B Road, Thane, Maharashtra'
+    -> S2-325578217: 'TEAM ADVISORS PRIVATE  LIMITED' | 'DOOR NO 603 BLDG NO I, WING PHASE 2 BHOOMI ACRES WAGHBILL G B ROAD, THANE, Maharashtra'
+    -> S3-646560545: 'Smt Team Advisors Prívate Ltd' | 'Flat No 603 Bldg No I, Wing Phase 2 Bhoomi Acres Waghbill G B Road, Thane, MH'
+    -> S3-365344187: '#teamadvisors' | 'Flat No 603 Bldg No I, Thane, MH'
+  S1 S1-894044392: 'Alpha Medical Centre' | 'A/303- T.F., Aditya Arcade Nr. Choice Restaurant, C.G. Road, Navran, Gpura, Ahmedabad, Gujarat'
+    -> S2-179586944: 'Alpha Medical Centre Corp' | 'A/303- T.F., ADITYA ARADE NR. CHOICE RESTAURANT, C.G. ROAD, NAVRAN, GPURA, AHMEDABAD, Gujarat'
+    -> S3-101803043: 'ALPHA MEDlCAL CENTRE' | 'A/303- T.f., Aditya Arcade Nr. Choice Restaurant, C.g. Road, Navran, Gpura, Ahmedabad, GJ'
+  S1 S1-854162179: 'Yogmaya Meditech Group' | 'B-38 Old Dlf Colony, Sunder Singh Marg, Gurgaon Kty., Gurgaon, Haryana'
+    -> S2-536500456: 'M/s Yogmaya Meditech' | 'B-38 OLD DLF COLONY, SUNDER SINGH MARG, GURGAON KTY., Haryana'
+    -> S3-987160049: 'Yogmaya (Group) Megssetch' | 'HR, B-#38 Old Dlf Colony, Sunder Singh Marg, Gurgaon, Gurgaon Kty.'
+  S1 S1-770958773: 'Sai Products Private Limited' | 'Office No 403 Sn 825/799Bp, 137B Abhijit Court Erandawna, Pune, Pune, Maharashtra'
+    -> S2-371182646: 'साईं प्रोडक्ट्स प्राइवेट लिमिटेड' | 'PUNE, 137B ABHIJIT COURT ERANDAWNA, PUNE, PUNE, महाराष्ट्र, OFFICE NO 0403 SN 825/799BP'
+    -> S2-21282480: 'साईं प्रोडक्ट्स प्राइवेट लिमिटेड' | 'OFFICE NO 0403 SN 825/799BP, 137B ABHIJIT COURT ERANDAWNA, PUNE, PUNE, Maharashtra'
+    -> S2-212077926: 'Sai Products Private (Limited)' | 'OFFICE NO 0403 SN 825/799BP, 137B ABHIJIT COURT ERANDAWNA, PUNE, PUNE, Maharashtra'
+    -> S2-658905266: 'साई प्रोडक्ट्स प्राइवेट लिमिटेड' | 'OFFICE NO 0403 SN 825/799BP, 137B ABHIJIT COURT ERANDAWNA, PUNE, PUNE, महाराष्ट्र'
+    -> S3-245459004: 'Sai Products Private #27191' | 'Office No 403 Sn 825/799Bp, 137B Abhijit Court Erandawna, Pune, Pune, महाराष्ट्र'
+    -> S3-572148537: 'साईं प्रोडक्ट्स प्राइवेट लिमिटेड' | 'Office No 403 Sn 825/799Bp, Pune, MH'
+    -> S3-78344566: 'Umbracira Labs DBA: Sai Products Private Limited' | 'Office No 403 Sn 825/799Bp, 137B Abhijit Court Erandawna, Pune, Pune, Maharashtra'
+  S1 S1-88598698: 'Patronus Sangh' | 'Plot No. 22, Near Khila Company, Nagpur, Maharashtra'
+    -> S2-526178873: 'Patronus Sángh' | '22 , NEAR KHILA COMPANY, NAGPUR, Maharashtra'
+    -> S3-25607953: 'Patronus Sangh Company' | ''
+  S1 S1-930643492: 'Integrated Construction Global LLC' | '7471 300th Street, Altamont, IL'
+    -> S2-403903650: 'Integrated Construction Global LLC' | '7471 300TH ST, ALTAMONT, IL'
+    -> S2-440284620: 'Integrated Construction Glóbal LLC' | '7471 300th Street, ALTAMONT, IL'
+    -> S3-193210911: 'Integrated Construction Global' | '300nd Street, Altamont, Illinois'
+    -> S3-550347556: '#integratedconstruction' | '7471 300nd Street, Altamont, Illinois'
+  S1 S1-155450727: 'Enright, Castaneda and Settles Company' | '10702 Whitfield Ridge Drive, Charlotte, NC'
+    -> S2-756097048: 'ENRIGHT, CASTANEDA AND SETTLES' | '10702 Whitfield Ridge Drive, CHARLOTTE, NC'
+    -> S3-108037158: 'énrightcastanedasettles.com' | '#10702 Whitfield Ridge Drive, PO Box 2910, Charlotte, North Carolina'
+  S1 S1-694592785: 'Capital Sab LLC' | '211 Marie Place, Henderson, KY'
+    -> S2-986726168: 'CAPITAL SAB  LLC' | '211 MARIE PLACE, HENDERSON, KY'
+    -> S2-247716269: 'Capital  Sab L.L.C.' | 'KY, 211 MARIE PLACE, HENDERSON'
+    -> S2-163193604: 'Canpital Sab  LLC' | '211 MARIE PL, HENDERSON, KY'
+    -> S3-498807874: 'capitalsab.com' | '211-D Marie Pl, Henderson, Kentucky'
+  S1 S1-387267964: 'Jai Products Private Limited' | 'House No 78, 1St Floor, Blk-D, Ashok Vihar Ph-I, Landmark Near Aggarwal Dharmsala, Delhi, North West, Delhi'
+    -> S2-341053987: 'जय प्रोडक्ट्स प्राइवेट लिमिटेड' | 'HOUSE NO 78, 1ST FLOOR, BLK-D, ASHOK VIHAR PH-I, LANDMARK NEAR AGGARWAL DHARMSALA, NORTH WEST, DELHI'
+    -> S3-578419193: 'जय प्रोडक्ट्स प्राइवेट लिमिटेड' | 'House No 78, 1St Floor, Blk-d, Ashok Vihar Ph-i, Landmark Near Aggarwal Dharmsala, Delhi, North West, DL'
+    -> S3-744528181: 'Jai Products Private-Limited' | 'House No 78, 1St Floor, Blk-d, Ashok Vihar Ph-i, Landmark Near Aggarwal Dharmsala, North West, Delhi, दिल्ली'
+  S1 S1-392867569: 'Costner Bsp Inc' | '125 Main Street, Helena, OK'
+    -> S2-862918087: 'COSTNER BSP INC #59438' | '0125 MAIN ST, HELENA, OK'
+    -> S2-127273152: 'Costner Bsp Ínc' | '0125 MAIN ST, HELENA, OK'
+    -> S2-512796161: 'Costner Inc Bsp' | 'HELENA, OK, 0125 MAIN ST'
+    -> S3-270000368: 'Csoosthnre Bsp Ínc' | '125 Main Steet, Helena CITY, Oklahoma'
+    -> S3-943147424: 'Costner Bsp' | '125 Main Street, Helena CITY, Oklahoma'
+    -> S3-572081431: 'Xyloyuma Sys dba Costner Bsp Inc' | '125 Main Street, Helena, OK'
+  S1 S1-71756895: 'A Cure 3 All PC' | '6049 Blue Iris Road, Richmond City, VA'
+    -> S2-450418076: 'cure3all.com' | '6049-C BLUE IRIS RD, RICHMOND CITY, VA'
+    -> S2-261166242: 'A CURE  3 ALL' | '6049-C BLUE IRIS RD, RICHMOND CITY, VA'
+    -> S3-4489660: 'Inc A Cure 3 All' | 'Richmond, 6049 Blue Iris Road, Virginia'
+    -> S3-197702932: 'A Cure 3' | 'Richmond City, 6049 Blue Iris Rd, Virginia'
+    -> S3-124091370: 'A Cure 3 All Inc' | '6049 Blue Iris Rd, Richmond City, Virginia'
+    -> S3-136219814: 'Arcnovi Labs née A Cure 3 All PC' | '6049 Blue Iris Road, Richmond City, VA'
+
+=== (i) 8 France test records ===
+  S1-156285671: '<< Team Ecole' | '175 Boulevard du Président Franklin Roosevelt, Bordeaux, Nouvelle-Aquitaine'
+  S1-921369899: 'ZNB Club SARL' | 'Nouvelle-Aquitaine, La Teste-de-Buch, 5 bis Rue Pierre Dignac'
+  S1-913506265: 'Thermal & Fils SASU' | '20 Rue Parmentier, Dunkerque, Hauts-de-France'
+  S1-628750886: 'Grain & Fils' | 'Lille, 329 Avenue de Dunkerque, Hauts-de-France'
+  S1-466641145: 'Elephant Centre EURL' | '30 Rue Lachassaigne, Bordeaux, Nouvelle-Aquitaine'
+  S1-385801270: 'Maison de Santé Generation' | '30 Rue Louis Thénard, Saint-Nazaire, Pays de la Loire'
+  S1-717749279: 'Saint-Herblain Societe SARL' | '5 Impasse Jean Baptiste Clément, Saint-Herblain, Pays de la Loire'
+  S1-616465752: 'Association de Pena' | '21 Chemin de la Traverse, Bordeaux, Nouvelle-Aquitaine'
+
+Step 1 data checks complete.
