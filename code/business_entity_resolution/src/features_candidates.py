@@ -23,6 +23,7 @@ Usage: ``python features_candidates.py train`` or ``... test``.
 """
 
 import sys
+import time
 
 import pandas as pd
 import pyarrow as pa
@@ -31,8 +32,6 @@ import pyarrow.parquet as pq
 from config import FEATURES_DIR, RAW_DIR, TRAIN_GT_LONG_PARQUET, raw_parquet_path
 from db import connect
 from features import WORKERS, compute_pair_features, make_pool
-import time
-
 from perf import print_sysinfo, stage, progress_line
 
 sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
@@ -132,9 +131,43 @@ def featurize_candidates(con, split, scored_table, out_path, with_label):
     print(f"  saved -> {out_path}")
 
 
+def patch_competitor_counts():
+    """Bug #4 fix (see HANDOFF.md): overwrite n_competitors/rank_among_competitors in the
+    already-computed train features with values from the full-population (2.2M train S1)
+    blocking pass, instead of the 300k-sample-only values baked in by featurize_candidates.
+
+    Pure pandas join, no re-run of compute_pair_features -- the other ~30 feature columns
+    are untouched. Requires blocking.py's "trainfull" mode to have already been run.
+    """
+    feat_path = FEATURES_DIR / "trainsample_candidates_features.parquet"
+    fix_path = FEATURES_DIR / "trainfull_competitor_fix.parquet"
+    feats = pd.read_parquet(feat_path)
+    fix = pd.read_parquet(fix_path).rename(columns={"match_source": "other_source"})
+
+    n_before = len(feats)
+    feats = feats.drop(columns=["n_competitors", "rank_among_competitors"]).merge(
+        fix, on=["s1_id", "match_id", "other_source"], how="left")
+    n_missing = feats["n_competitors"].isna().sum()
+    if n_missing:
+        print(f"[patch-competitors] WARNING: {n_missing}/{n_before} rows had no full-population "
+              f"match -- these should not exist per build_all_keys' per-row-independence guarantee; "
+              f"investigate before trusting this correction.")
+    assert len(feats) == n_before, "row count changed during patch join -- investigate"
+
+    table = pa.Table.from_pandas(feats, preserve_index=False)
+    pq.write_table(table, str(feat_path))
+    print(f"[patch-competitors] patched {n_before} rows -> {feat_path}")
+
+
 def main():
     """Featurize either the train-sample candidates (labeled) or the full test candidates."""
     which = sys.argv[1] if len(sys.argv) > 1 else "train"
+
+    if which == "patch-competitors":
+        with stage("patch competitor counts (bug #4 fix)"):
+            patch_competitor_counts()
+        return
+
     print_sysinfo()
     FEATURES_DIR.mkdir(parents=True, exist_ok=True)
     con = connect(memory_limit_gb=3, threads=2)
@@ -150,7 +183,7 @@ def main():
                                   FEATURES_DIR / "test_candidates_features.parquet",
                                   with_label=False)
     else:
-        raise SystemExit(f"unknown arg {which!r}, expected 'train' or 'test'")
+        raise SystemExit(f"unknown arg {which!r}, expected 'train', 'test', or 'patch-competitors'")
 
     con.close()
 

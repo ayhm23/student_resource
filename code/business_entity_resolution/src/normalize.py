@@ -48,7 +48,22 @@ CHUNK_ROWS = 100_000
 POOL_CHUNKSIZE = 2000
 WORKERS = 4  # conservative: this machine often has only a few GB free RAM
 
-WORD_RE = re.compile(r"\w+", re.UNICODE)
+# Plain \w does not match Indic combining vowel signs/virama (Unicode
+# categories Mn/Mc), so it shreds native-script words at every vowel sign --
+# e.g. "शक्ति" (shakti) split into "शक" + "त", silently dropping the "ि" in
+# between. Extending the class with the full Brahmic script blocks (not just
+# the marks) keeps those characters attached to their base letter; harmless
+# for pure-Latin text since none of these code points can appear there.
+INDIC_BLOCKS = ("ऀ-ॿ"  # Devanagari
+                "ঀ-৿"  # Bengali
+                "਀-੿"  # Gurmukhi
+                "઀-૿"  # Gujarati
+                "଀-୿"  # Odia
+                "஀-௿"  # Tamil
+                "ఀ-౿"  # Telugu
+                "ಀ-೿"  # Kannada
+                "ഀ-ൿ")  # Malayalam
+WORD_RE = re.compile(rf"[\w{INDIC_BLOCKS}]+", re.UNICODE)
 DEVANAGARI_RE = re.compile(r"[ऀ-ॿ]")
 DOTTED_INITIALS_RE = re.compile(r"\b(?:[a-z]\.){2,}")
 NONALNUM_RE = re.compile(r"[^a-z0-9\s]")
@@ -227,6 +242,16 @@ def _apply_state_and_abbrev(tokens, country):
     e.g. "de" is Delaware's code but also the French preposition "of/from",
     and without this scoping every French address containing "de" (nearly
     all of them) would be mis-tagged state="de".
+
+    A full state name (multi-word or single-word) always wins over a bare
+    short code, regardless of which appears first in the address: short
+    codes collide with ordinary abbreviations (e.g. "Ap" for "Apartment"
+    happens to equal Andhra Pradesh's code "ap"), so trusting whichever
+    token comes first mis-reads addresses like "Ap Xiv/326, Kannur, Kerala"
+    as Andhra Pradesh instead of Kerala. If no full name is found at all,
+    the *last* short code in the address wins, not the first -- trailing
+    tokens are far more likely to actually be the state field than leading
+    ones (which are more often building/unit abbreviations).
     """
     if country in _G["state_maps"]:
         state_map = _G["state_maps"][country]
@@ -259,19 +284,27 @@ def _apply_state_and_abbrev(tokens, country):
                     state_found = state_map[key]
     tokens = [t for t in tokens if t is not None]
 
+    # Single-word full state names are still a "full name" -- same
+    # unconditional priority over short codes as the multi-word pass above.
+    if not state_found:
+        for t in tokens:
+            if t in state_map and " " not in t:
+                state_found = state_map[t]
+                break
+
+    # Only fall back to short codes (e.g. "il", "mh") if no full name was
+    # found anywhere; take the *last* one, not the first (see docstring).
+    if not state_found:
+        for t in tokens:
+            if t in state_codes:
+                state_found = t
+
     out = []
     for t in tokens:
         if t in _G["addr_abbr"]:
             out.append(_G["addr_abbr"][t])
         elif t in state_map and " " not in t:
-            if not state_found:
-                state_found = state_map[t]
             out.append(state_map[t])
-        elif t in state_codes:
-            # already a short code (e.g. "il", "mh") rather than a full name
-            if not state_found:
-                state_found = t
-            out.append(t)
         else:
             out.append(t)
     return out, state_found

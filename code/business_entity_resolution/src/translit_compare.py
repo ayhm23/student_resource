@@ -18,6 +18,7 @@ from indic_transliteration import sanscript
 from indic_transliteration.sanscript import transliterate
 
 from config import RAW_DIR
+from normalize import WORD_RE
 from perf import print_sysinfo, stage
 
 sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
@@ -35,7 +36,6 @@ SCRIPT_RANGES = [
 ]
 SCRIPT_BY_NAME = {name: scheme for name, _, _, scheme in SCRIPT_RANGES}
 
-WORD_RE = re.compile(r"\w+", re.UNICODE)
 CONSONANT_SUBS = [("ph", "f"), ("bh", "b"), ("dh", "d"), ("th", "t"), ("kh", "k"),
                    ("gh", "g"), ("ch", "c"), ("sh", "s"), ("z", "j"), ("q", "k"),
                    ("w", "v"), ("ck", "k")]

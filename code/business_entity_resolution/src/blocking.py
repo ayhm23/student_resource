@@ -17,8 +17,8 @@ import random
 import sys
 import time
 
-from config import (BLOCKING_REPORT_PATH, CAND_DIR, DICTS_DIR, OUTPUT_DIR,
-                     TEST_CANDIDATES_PARQUET, TRAIN_GT_LONG_PARQUET,
+from config import (BLOCKING_REPORT_PATH, CAND_DIR, DICTS_DIR, FEATURES_DIR,
+                     OUTPUT_DIR, TEST_CANDIDATES_PARQUET, TRAIN_GT_LONG_PARQUET,
                      TRAIN_SAMPLE_S1_PARQUET, norm_parquet_path,
                      raw_parquet_path)
 from db import connect
@@ -688,6 +688,51 @@ def measure_recall(con):
 
 
 # ---------------------------------------------------------------------------
+# Part G: full-train-S1 competitor counts (bug #4 fix -- see HANDOFF.md)
+# ---------------------------------------------------------------------------
+
+def write_trainfull_competitor_counts(con):
+    """Block ALL 2.2M train S1 (not the 300k sample) to get true competitor counts.
+
+    ``trainsample_scored``'s ``n_competitors``/``rank_among_competitors`` (used
+    as features) only reflect competition among the 300k-row train sample,
+    while the same features at test time reflect competition among the full
+    1.73M test S1 -- a real train/test covariate shift. Blocking keys are
+    computed per-S1-row independent of which other S1 rows are in the same
+    batch, so ``trainsample_scored``'s (s1_id, match_id, match_source) triples
+    are a strict subset of this full run's -- every training row will find a
+    match in the join below. Saves a small correction table (~3 columns) that
+    ``features_candidates.py``'s ``patch-competitors`` mode joins onto the
+    already-computed 9.9M-row training features, instead of re-running the
+    (slow, rapidfuzz-heavy) full feature computation.
+    """
+    scored_table = build_all_keys(con, "train", "v_train_S1_norm", "trainfull")
+
+    con.execute(f"""
+        CREATE OR REPLACE TABLE trainfull_competitor_fix AS
+        SELECT s1_id, match_id, match_source,
+               count(*) OVER (PARTITION BY match_id, match_source) AS n_competitors,
+               row_number() OVER (PARTITION BY match_id, match_source ORDER BY cheap_score DESC) AS rank_among_competitors
+        FROM {scored_table}
+        WHERE (s1_id, match_id, match_source) IN (
+            SELECT s1_id, match_id, match_source FROM trainsample_scored
+        )
+    """)
+    n_fixed = con.execute("SELECT count(*) FROM trainfull_competitor_fix").fetchone()[0]
+    n_sample = con.execute("SELECT count(*) FROM trainsample_scored").fetchone()[0]
+    print(f"[trainfull] corrected {n_fixed}/{n_sample} training candidate rows "
+          f"with full-population (2.2M train S1) competitor counts")
+    if n_fixed != n_sample:
+        print(f"[trainfull] WARNING: {n_sample - n_fixed} training rows had no match in the "
+              f"full-population run -- investigate before trusting the correction.")
+
+    FEATURES_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = FEATURES_DIR / "trainfull_competitor_fix.parquet"
+    con.execute(f"COPY trainfull_competitor_fix TO '{out_path.as_posix()}' (FORMAT PARQUET)")
+    print(f"[trainfull] saved -> {out_path}")
+
+
+# ---------------------------------------------------------------------------
 # Part F: full test candidates
 # ---------------------------------------------------------------------------
 
@@ -748,13 +793,35 @@ def main():
     recall) and skip the much more expensive Part F (full test candidates) --
     used to validate a blocking change's recall impact cheaply before paying
     for the full test run.
+
+    Pass "trainfull" to instead run ONLY Part G (full 2.2M train S1 blocking,
+    for the n_competitors train/test-mismatch fix -- see HANDOFF.md). Requires
+    Part E to have already been run in this warehouse (needs trainsample_scored
+    to exist), but does not need Part F.
     """
     import sys as _sys
-    train_only = len(_sys.argv) > 1 and _sys.argv[1] == "train-only"
+    arg = _sys.argv[1] if len(_sys.argv) > 1 else ""
+    train_only = arg == "train-only"
+    trainfull_only = arg == "trainfull"
 
     print_sysinfo()
-    splits = ("train",) if train_only else ("train", "test")
     con = connect(memory_limit_gb=4, threads=2)
+
+    if trainfull_only:
+        for source in ("S1", "S2", "S3"):
+            norm_view(con, "train", source)
+        all_norm_union(con, "train")
+        s23_norm_union(con, "train")
+        with stage("compute IDF (train)"):
+            compute_idf(con, "train")
+        with stage("build token tables (train)"):
+            build_token_tables(con, "train")
+        with stage("Part G: full-train-S1 competitor counts"):
+            write_trainfull_competitor_counts(con)
+        con.close()
+        return
+
+    splits = ("train",) if train_only else ("train", "test")
 
     report = []
     for split in splits:

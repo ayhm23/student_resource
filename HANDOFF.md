@@ -21,7 +21,84 @@ HANDOFF.md" — that's enough context to resume without re-deriving anything.
   below). On a bigger machine, things will be much simpler and faster — see
   "If you're now on a better machine" at the bottom.
 
+## Bugs found + fixed (2026-09-26, this continuation)
+
+A pasted report describing bug fixes made on a different (lab) machine's
+variant of this pipeline was checked line-by-line against our actual code,
+not assumed to transfer. 3 of 11 items described real, currently-present
+bugs here; the rest either didn't apply or are already-known deferred work.
+
+**Fixed:**
+
+1. **Indic word-splitting** (`normalize.py`, `mine_dicts.py`,
+   `translit_compare.py`). `\w+` does not match Devanagari/Indic combining
+   vowel signs or virama (Unicode categories Mn/Mc) — confirmed empirically:
+   "शक्ति" (shakti) tokenized as `['शक', 'त']`, silently losing the vowel
+   sign in between. This shredded every native-script name/address before
+   comparison, and is almost certainly why the Devanagari name-token
+   dictionary only reached 13.3% coverage. Fix: extended `WORD_RE` to
+   include the full Brahmic Unicode blocks (Devanagari, Bengali, Gurmukhi,
+   Gujarati, Odia, Tamil, Telugu, Kannada, Malayalam), not just the
+   combining-mark subranges — additive only, so pure-Latin tokenization
+   (US/France) is byte-identical to before. Verified: "शक्ति" now tokenizes
+   whole. `mine_dicts.py`/`translit_compare.py` now import `WORD_RE` from
+   `normalize.py` instead of keeping their own stale copies.
+
+2. **State-priority bug** (`normalize.py::_apply_state_and_abbrev`). A
+   single left-to-right pass over address tokens let a bare short state
+   code (e.g. "ap", which collides with an "Apartment" abbreviation) win
+   over a full state name appearing later in the same address — e.g. "Ap
+   Xiv/326, Kannur, Kerala" was read as Andhra Pradesh instead of Kerala.
+   Fix: full state names (multi-word or single-word) now always take
+   priority over short codes regardless of position; only if no full name
+   is found does a short code apply, and now the *last* one wins, not the
+   first. Verified on the exact example above: now resolves to `kl`
+   (Kerala).
+
+3. **Train/test `n_competitors` mismatch** (narrow fix, in progress).
+   `folds.py`'s 300k-row train S1 sample means `n_competitors`/
+   `rank_among_competitors` (`features_candidates.py`) were computed
+   against only the 300k sample for training but against the full 1.73M
+   test S1 for test — a real covariate shift on two live features. Chose
+   the narrow fix over a full retrain-on-2.2M-rows rebuild (that risks
+   16GB RAM and 4-5+ extra hours for a ~65M-row training table): re-block
+   the full 2.2M train S1 once into a new `trainfull_scored` table
+   (reusing `build_all_keys`, which already handles arbitrary row counts),
+   recompute the 2 columns from that full-population table, and patch
+   them into the existing 9.9M-row `trainsample_candidates_features.parquet`
+   by `(s1_id, match_id)` join — no need to re-run `compute_pair_features`.
+
+**Checked, doesn't apply to us:** native-script state dictionaries (we
+don't have one — nothing to be "half-mapped"), blocking-OOM-from-joining-
+on-common-words (our join is already keyed on `(country, key_type,
+key_value)` + chunked, different mechanism, already solved), missing
+top-K cut before featurizing (we already have `TOP_K_PER_S1`).
+
+**Checked, real ideas but correctly deferred** (already tracked as Step 3
+P1/P2, intentionally not done this session): raising blocking caps on a
+bigger machine (biggest lever, see "If you're now on a better machine"
+below), a fuzzy house-number blocking key (new idea, not yet built), 4 new
+pair features beyond what we have (name containment ratio, domain-style
+name match, off-by-one house number, unshared-word count), the two-stage
+model (Track C4), and a per-S1 expected-F0.5 decision rule (Track D).
+
+**Because bugs #1 and #2 above are inside `normalize.py`, everything
+downstream must be rebuilt from `mine_dicts.py` onward** — dictionaries,
+norm parquet, blocking keys/candidates, and features were all built from
+the buggy tokenizer/state logic. The "just run it" sequence below is
+UPDATED for this; the old one (skip straight to `features_candidates.py`)
+is now stale. No trained model exists yet on any version of this data, so
+nothing already-submitted (LB 0.92) is invalidated.
+
 ## What "just run it" means right now
+
+Rebuild order after the 2026-09-26 bug fixes above (full sequence, not the
+shortcut): `mine_dicts.py` → `normalize.py` → `blocking.py` →
+`features_candidates.py train` → `features_candidates.py test` → new
+trainfull-blocking pass for the n_competitors fix → `train_model.py`. See
+"Exact resume sequence" below for the commands; expect several hours total
+on this machine (see timing table) — print/confirm the estimate before
+starting per the standing rule.
 
 If the background run from this session finished cleanly (check
 `output/BLOCKING_REPORT_v2_trainonly.md` mtime and look for a completed
@@ -105,6 +182,7 @@ about this; don't silently skip and claim done.
 | `normalize.py` | ~14–17 min | v1 was 14min, v2 (+skeleton) ~17min |
 | `blocking.py` (train-only) | ~25 min | Part E only, for cheap validation |
 | `blocking.py` (full) | ~90 min | Part E + Part F (full test) |
+| `blocking.py trainfull` | ~90-115 min (est.) | NEW Part G, bug #4 fix: full 2.2M train S1 |
 | `features.py` (Phase 1) | ~15 min | GT pairs + negatives, sanity check |
 | `features_candidates.py train` | ~16 min | 9.9M candidate pairs |
 | `features_candidates.py test` | ~100 min | 59.7M candidate pairs |
@@ -128,8 +206,10 @@ python -m venv .venv
 .venv/Scripts/python.exe code/business_entity_resolution/src/mine_dicts.py
 .venv/Scripts/python.exe code/business_entity_resolution/src/normalize.py
 .venv/Scripts/python.exe code/business_entity_resolution/src/blocking.py   # ~90 min; pass "train-only" as arg to skip Part F for a cheap check
+.venv/Scripts/python.exe code/business_entity_resolution/src/blocking.py trainfull   # NEW, ~90-115 min: bug #4 fix, full 2.2M train S1 competitor counts
 .venv/Scripts/python.exe code/business_entity_resolution/src/features.py
 .venv/Scripts/python.exe code/business_entity_resolution/src/features_candidates.py train
+.venv/Scripts/python.exe code/business_entity_resolution/src/features_candidates.py patch-competitors   # NEW, ~1-2 min: joins in the trainfull fix
 .venv/Scripts/python.exe code/business_entity_resolution/src/features_candidates.py test
 .venv/Scripts/python.exe code/business_entity_resolution/src/train_model.py
 .venv/Scripts/python.exe code/business_entity_resolution/src/oof_report.py  # optional, for the worst-20 report

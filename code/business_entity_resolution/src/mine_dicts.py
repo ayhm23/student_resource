@@ -34,6 +34,7 @@ from unidecode import unidecode
 
 from config import RAW_DIR, DICTS_DIR, raw_parquet_path
 from db import connect
+from normalize import WORD_RE
 from perf import print_sysinfo, stage
 
 sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
@@ -44,7 +45,8 @@ MIN_SUPPORT = 5
 MIN_AGREEMENT = 0.7
 
 DEVANAGARI_RE = re.compile(r"[ऀ-ॿ]")
-WORD_RE = re.compile(r"\w+", re.UNICODE)
+# WORD_RE comes from normalize.py -- see there for why plain \w breaks on
+# Indic combining marks (it shreds native-script words like "शक्ति").
 
 ADDR_ABBR_CANDIDATES = {
     "road": "rd", "street": "st", "drive": "dr", "avenue": "ave", "lane": "ln",
