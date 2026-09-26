@@ -47,6 +47,7 @@ NUMERIC_FEATURES = [
     "name_ratio", "name_partial_ratio", "name_token_sort_ratio", "name_token_set_ratio",
     "name_jaro_winkler", "name_nospace_ratio", "name_nospace_contains", "name_sorted_chars_ratio",
     "name_idf_jaccard", "name_idf_rarest_shared", "name_idf_rarest_unshared",
+    "name_skeleton_ratio", "name_skeleton_token_set_ratio", "name_skeleton_jaccard",
     "s1_name_len", "other_name_len", "name_len_absdiff",
     "addr_token_set_ratio", "addr_token_sort_ratio", "addr_num_jaccard", "addr_num_max_equal",
     "addr_num_shared_count", "addr_idf_jaccard", "other_addr_empty",

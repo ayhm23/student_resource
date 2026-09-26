@@ -30,6 +30,13 @@ Design notes baked into the feature functions:
 * Every similarity/statistic that cannot be computed (empty field on either
   side, missing IDF table, no shared tokens union) is NaN, never 0 -- 0 is a
   valid similarity score.
+
+Step 3 Track B addition: ``name_skeleton_ratio``/``_token_set_ratio``/
+``_jaccard`` compare the ``name_skeleton`` field (see ``normalize.py``'s
+``skeleton_token``) instead of the raw ``name_core`` tokens -- this survives
+transliteration/typo spelling variance (e.g. unidecode's "yuunivrsl" and
+plain "universal" both fold toward the same skeleton) that the raw-token
+metrics above cannot see past.
 """
 
 import sys
@@ -104,11 +111,12 @@ def _parse_numbers(numbers_str):
 
 
 def _name_variants(name_dict):
-    """Return [main_variant] plus an [alt_variant] (own core/nospace/sorted_chars) when a wrapper exists."""
+    """Return [main_variant] plus an [alt_variant] (own core/nospace/sorted_chars/skeleton) when a wrapper exists."""
     variants = [{
         "core": name_dict["name_core"],
         "nospace": name_dict["name_nospace"],
         "sorted_chars": name_dict["name_sorted_chars"],
+        "skeleton": name_dict.get("name_skeleton", ""),
     }]
     alt = name_dict.get("name_alt", "")
     if alt:
@@ -117,8 +125,18 @@ def _name_variants(name_dict):
             "core": alt_dict["name_core"],
             "nospace": alt_dict["name_nospace"],
             "sorted_chars": alt_dict["name_sorted_chars"],
+            "skeleton": alt_dict.get("name_skeleton", ""),
         })
     return variants
+
+
+def _set_jaccard(tokens_a, tokens_b):
+    """Plain (non-IDF) Jaccard of two token lists; NaN if either side is empty."""
+    if not tokens_a or not tokens_b:
+        return np.nan
+    set_a, set_b = set(tokens_a), set(tokens_b)
+    union = set_a | set_b
+    return len(set_a & set_b) / len(union) if union else np.nan
 
 
 def _idf_jaccard_and_rarest(tokens_a, tokens_b, idf_map, country):
@@ -155,6 +173,7 @@ def _name_features(s1_n, o_n, country, idf_map):
 
     ratio = partial = tsort = tset = jw = -1.0
     nospace_ratio = nospace_contains = sorted_ratio = -1.0
+    skeleton_ratio = skeleton_tset = skeleton_jaccard = -1.0
     best_jaccard, best_shared_idf, best_unshared_idf = -1.0, np.nan, np.nan
 
     for va in variants_a:
@@ -179,6 +198,16 @@ def _name_features(s1_n, o_n, country, idf_map):
             if va["sorted_chars"] and vb["sorted_chars"]:
                 sorted_ratio = max(sorted_ratio, fuzz.ratio(va["sorted_chars"], vb["sorted_chars"]))
 
+            # Step 3 Track B: skeleton-form similarity -- survives the
+            # transliteration/typo spelling variance that name_core's exact
+            # tokens can't (see normalize.py's skeleton_token).
+            if va["skeleton"] and vb["skeleton"]:
+                skeleton_ratio = max(skeleton_ratio, fuzz.ratio(va["skeleton"], vb["skeleton"]))
+                skeleton_tset = max(skeleton_tset, fuzz.token_set_ratio(va["skeleton"], vb["skeleton"]))
+                sj = _set_jaccard(va["skeleton"].split(), vb["skeleton"].split())
+                if not np.isnan(sj):
+                    skeleton_jaccard = max(skeleton_jaccard, sj)
+
     def _clean(v):
         return np.nan if v == -1.0 else v
 
@@ -202,6 +231,9 @@ def _name_features(s1_n, o_n, country, idf_map):
         "name_idf_jaccard": _clean(best_jaccard),
         "name_idf_rarest_shared": best_shared_idf,
         "name_idf_rarest_unshared": best_unshared_idf,
+        "name_skeleton_ratio": _clean(skeleton_ratio),
+        "name_skeleton_token_set_ratio": _clean(skeleton_tset),
+        "name_skeleton_jaccard": _clean(skeleton_jaccard),
         "legal_form_match": legal_form_match,
         "s1_name_len": len_a,
         "other_name_len": len_b,

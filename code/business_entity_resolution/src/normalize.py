@@ -7,11 +7,17 @@ dictionaries mined by ``mine_dicts.py``, and writes
 
     id, country,
     name_clean, name_main, name_alt, name_core, name_nospace,
-    name_sorted_chars, legal_form,
-    addr_clean, numbers, state, addr_words
+    name_sorted_chars, legal_form, name_skeleton,
+    addr_clean, numbers, state, addr_words, addr_skeleton
 
-``numbers`` is a comma-joined string of integers (leading zeros stripped);
+``numbers`` is a comma-joined string of integers (leading zeros stripped;
+Step 3 Track A4 also recovers hyphen-split short numbers like "2-0"->20).
 ``name_core``/``name_nospace``/``addr_words`` are space-joined token strings.
+``name_skeleton``/``addr_skeleton`` (Step 3 Track A2) are the same tokens as
+``name_core``/``addr_words`` folded to a consonant skeleton (vowels/h/y
+dropped except each token's first letter, phonetic consonant merges,
+repeated letters collapsed) -- meant to survive transliteration/typo
+spelling variance that breaks exact/prefix token matching.
 
 Per-record text work is pure Python (regex/unidecode), so it is parallelized
 with ``multiprocessing.Pool`` over chunks read from DuckDB -- never a
@@ -49,6 +55,20 @@ NONALNUM_RE = re.compile(r"[^a-z0-9\s]")
 HASH_DIGITS_RE = re.compile(r"#\d+")
 MULTISPACE_RE = re.compile(r"\s+")
 NUMBER_RE = re.compile(r"\d+")
+HYPHEN_NUM_RE = re.compile(r"\b(\d+)-(\d+)\b")
+
+# Step 3 Track A2: a "skeleton" folds transliterated non-Latin text (and
+# ordinary Latin typos) toward a script/spelling-invariant form so that e.g.
+# unidecode's "yuunivrsl" (from Telugu) and the Latin "universal" compare as
+# similar tokens. Tested against real train pairs (see translit_compare.py):
+# unidecode already beats indic_transliteration as the upstream transliterator
+# for 7 of 9 Indic scripts, so the skeleton is built on unidecode's output
+# (already applied in _base_clean), not a second transliteration pass.
+CONSONANT_SUBS = [("ph", "f"), ("bh", "b"), ("dh", "d"), ("th", "t"), ("kh", "k"),
+                   ("gh", "g"), ("ch", "c"), ("sh", "s"), ("z", "j"), ("q", "k"),
+                   ("w", "v"), ("ck", "k")]
+SKELETON_DROP_RE = re.compile(r"[aeiouhy]")
+SKELETON_REPEAT_RE = re.compile(r"(.)\1+")
 
 NAME_STOPWORDS = {"a", "an", "the", "and", "of", "et", "de", "la", "le", "du"}
 DOMAIN_TOKENS = {"com", "net", "org"}
@@ -135,8 +155,33 @@ def _base_clean(text, devanagari_map):
     return list(dict.fromkeys(tokens))
 
 
+def skeleton_token(tok):
+    """Fold one lowercase-ASCII token to a consonant skeleton (Step 3 Track A2).
+
+    Applies phonetic consonant merges, then drops vowels/h/y everywhere
+    except the token's own first letter (so distinct tokens don't collapse
+    to the same empty skeleton), then collapses repeated letters -- smooths
+    over the doubled-letter/extra-vowel artifacts transliteration commonly
+    introduces (e.g. unidecode's "yuunivrsl" and plain "universal" both fold
+    towards "unvrsl"-like forms).
+    """
+    if not tok:
+        return ""
+    s = tok
+    for a, b in CONSONANT_SUBS:
+        s = s.replace(a, b)
+    first, rest = s[0], s[1:]
+    rest = SKELETON_DROP_RE.sub("", rest)
+    return SKELETON_REPEAT_RE.sub(r"\1", first + rest)
+
+
+def skeleton_join(tokens):
+    """Skeletonize a list of tokens and space-join them, parallel in order to ``tokens``."""
+    return " ".join(skeleton_token(t) for t in tokens if t)
+
+
 def normalize_name(name):
-    """Compute name_clean/name_main/name_alt/name_core/name_nospace/name_sorted_chars/legal_form."""
+    """Compute name_clean/name_main/name_alt/name_core/name_nospace/name_sorted_chars/legal_form/name_skeleton."""
     tokens = _base_clean(name, _G["dev_name"])
     name_clean = " ".join(tokens)
 
@@ -162,11 +207,13 @@ def normalize_name(name):
         ns_toks = ns_toks[1:]
     name_nospace = "".join(ns_toks)
     name_sorted_chars = "".join(sorted(c for c in name_nospace if c.isalpha()))
+    name_skeleton = skeleton_join(core_toks)
 
     return {
         "name_clean": name_clean, "name_main": name_main, "name_alt": name_alt,
         "name_core": name_core, "name_nospace": name_nospace,
         "name_sorted_chars": name_sorted_chars, "legal_form": legal_form,
+        "name_skeleton": name_skeleton,
     }
 
 
@@ -249,9 +296,30 @@ def _drop_addr_keywords(tokens):
     return out
 
 
+def extract_numbers(address):
+    """Extract address numbers (Step 3 Track A4: also recovers hyphen-split short numbers).
+
+    Plain digit runs are extracted as before (leading zeros drop naturally
+    via ``int()``; "#10702", "L-02/1147" etc. already work since ``\\d+``
+    ignores surrounding non-digit characters). Additionally, a "23-27" or
+    "2-0" style hyphenated pair whose JOINED length is <=4 also contributes
+    its joined form (20, 2327), since this dataset's corruption sometimes
+    splits what should be one short house number across a hyphen -- the
+    original individual parts are kept too, since a real address range
+    ("23-27 Main St") is also common and both readings should stay available
+    to the blocking keys.
+    """
+    numbers = {int(m) for m in NUMBER_RE.findall(address)}
+    for m in HYPHEN_NUM_RE.finditer(address):
+        joined = m.group(1) + m.group(2)
+        if len(joined) <= 4:
+            numbers.add(int(joined))
+    return sorted(numbers)
+
+
 def normalize_addr(address, country):
-    """Compute addr_clean/numbers/state/addr_words for one address string."""
-    numbers = sorted({int(m) for m in NUMBER_RE.findall(address)})
+    """Compute addr_clean/numbers/state/addr_words/addr_skeleton for one address string."""
+    numbers = extract_numbers(address)
     tokens = _base_clean(address, _G["dev_addr"])
     tokens, state_found = _apply_state_and_abbrev(tokens, country)
     tokens = _drop_addr_keywords(tokens)
@@ -263,6 +331,7 @@ def normalize_addr(address, country):
         "numbers": ",".join(str(x) for x in numbers),
         "state": state_found,
         "addr_words": " ".join(addr_words),
+        "addr_skeleton": skeleton_join(addr_words),
     }
 
 

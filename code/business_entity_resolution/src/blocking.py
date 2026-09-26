@@ -64,12 +64,19 @@ def s23_norm_union(con, split):
 # ---------------------------------------------------------------------------
 
 def compute_idf(con, split):
-    """Compute per-(country, token) document frequency and IDF for name_core and addr_words."""
+    """Compute per-(country, token) document frequency and IDF for name_core/addr_words/name_skeleton.
+
+    name_skeleton gets its own independent IDF (Step 3 Track A5, key K5):
+    rarity is measured in skeleton-space, not inherited from the name_core
+    ranking, since a token that's common in word-space (e.g. a frequent
+    legal-form remnant) may skeletonize to something rarer or vice versa.
+    """
     con.execute(f"""
         CREATE OR REPLACE TABLE country_totals_{split} AS
         SELECT country, count(*) AS n FROM v_{split}_all_norm GROUP BY country
     """)
-    for field, table in (("name_core", f"idf_name_{split}"), ("addr_words", f"idf_addr_{split}")):
+    for field, table in (("name_core", f"idf_name_{split}"), ("addr_words", f"idf_addr_{split}"),
+                         ("name_skeleton", f"idf_skeleton_{split}")):
         con.execute(f"""
             CREATE OR REPLACE TABLE {table} AS
             SELECT d.country, d.token, d.df, t.n, ln(t.n::DOUBLE / d.df) AS idf
@@ -153,19 +160,35 @@ def build_keys_table(con, split, side_view, out_table):
             )
         ) WHERE rn <= {TOP_NUMBERS} GROUP BY source, id
     """)
+    # Step 3 Track A5, key K5: name_skeleton's own top rare tokens (ranked by
+    # a skeleton-space IDF, not inherited from name_core -- see compute_idf).
+    con.execute(f"""
+        CREATE OR REPLACE TABLE {out_table}_skel AS
+        SELECT source, id, list(token ORDER BY rn) AS top_skeleton_tokens FROM (
+            SELECT source, id, token,
+                   row_number() OVER (PARTITION BY source, id ORDER BY coalesce(i.idf, 0) DESC) AS rn
+            FROM (
+                SELECT source, id, country, unnest(string_split(name_skeleton, ' ')) AS token
+                FROM {side_view} WHERE name_skeleton <> ''
+            ) x
+            LEFT JOIN idf_skeleton_{split} i USING (country, token)
+        ) WHERE rn <= {TOP_NAME_TOKENS} GROUP BY source, id
+    """)
     con.execute(f"""
         CREATE OR REPLACE TABLE {out_table} AS
         SELECT
             s.source, s.id, s.country, s.state, s.name_alt, s.name_nospace,
             replace(s.name_alt, ' ', '') AS name_alt_nospace,
-            na.top_name_tokens, aa.top_alt_tokens, ada.top_addr_words, nua.top_numbers
+            na.top_name_tokens, aa.top_alt_tokens, ada.top_addr_words, nua.top_numbers,
+            sk.top_skeleton_tokens
         FROM {side_view} s
         LEFT JOIN {out_table}_name na USING (source, id)
         LEFT JOIN {out_table}_alt aa USING (source, id)
         LEFT JOIN {out_table}_addr ada USING (source, id)
         LEFT JOIN {out_table}_nums nua USING (source, id)
+        LEFT JOIN {out_table}_skel sk USING (source, id)
     """)
-    for suffix in ("name", "alt", "addr", "nums"):
+    for suffix in ("name", "alt", "addr", "nums", "skel"):
         con.execute(f"DROP TABLE IF EXISTS {out_table}_{suffix}")
 
 
@@ -218,6 +241,30 @@ def generate_key_rows(con, keys_table, out_table):
         UNION ALL
         SELECT source, id, country, 'K4_exact' AS key_type, country || '|' || name_alt_nospace AS key_value
         FROM {keys_table} WHERE length(name_alt_nospace) >= {MIN_NOSPACE_LEN}
+
+        UNION ALL
+        -- K5 (Step 3 Track A5): name_skeleton's own rare tokens, with state --
+        -- survives transliteration/typo spelling variance that breaks K2/K3's
+        -- exact-token matching (see normalize.py's skeleton_token).
+        SELECT source, id, country, 'K5' AS key_type,
+               country || '|' || state || '|' || tok AS key_value
+        FROM {keys_table}, UNNEST(top_skeleton_tokens) AS t(tok)
+        WHERE state <> '' AND tok <> ''
+
+        UNION ALL
+        SELECT source, id, country, 'K5_nostate' AS key_type,
+               country || '|' || tok AS key_value
+        FROM {keys_table}, UNNEST(top_skeleton_tokens) AS t(tok)
+        WHERE state = '' AND tok <> ''
+
+        UNION ALL
+        -- K6 (Step 3 Track A5): sorted pair of the 2 rarest name_core tokens,
+        -- no address needed at all -- covers entities with an empty/mismatched
+        -- candidate address, which K1 (address-only) can never reach.
+        SELECT source, id, country, 'K6' AS key_type,
+               country || '|' || least(top_name_tokens[1], top_name_tokens[2])
+                       || '|' || greatest(top_name_tokens[1], top_name_tokens[2]) AS key_value
+        FROM {keys_table} WHERE len(top_name_tokens) >= 2
     """)
 
 
@@ -231,7 +278,7 @@ def cap_s23_keys(con, s23_key_table, out_table):
         )
         SELECT k.* FROM {s23_key_table} k
         JOIN counts c USING (key_type, key_value)
-        WHERE c.n <= CASE WHEN k.key_type IN ('K2_nostate', 'K4_nostate') THEN {CAP_K2_NOSTATE} ELSE {CAP_DEFAULT} END
+        WHERE c.n <= CASE WHEN k.key_type IN ('K2_nostate', 'K4_nostate', 'K5_nostate') THEN {CAP_K2_NOSTATE} ELSE {CAP_DEFAULT} END
     """)
 
 
@@ -656,12 +703,22 @@ def write_test_candidates(con, chosen_k):
 
 
 def main():
-    """Run Parts C-F: IDF, key generation, train-sample recall, test candidates."""
+    """Run Parts C-F: IDF, key generation, train-sample recall, test candidates.
+
+    Pass "train-only" as the first CLI arg to stop after Part E (train-sample
+    recall) and skip the much more expensive Part F (full test candidates) --
+    used to validate a blocking change's recall impact cheaply before paying
+    for the full test run.
+    """
+    import sys as _sys
+    train_only = len(_sys.argv) > 1 and _sys.argv[1] == "train-only"
+
     print_sysinfo()
+    splits = ("train",) if train_only else ("train", "test")
     con = connect(memory_limit_gb=4, threads=2)
 
     report = []
-    for split in ("train", "test"):
+    for split in splits:
         for source in ("S1", "S2", "S3"):
             norm_view(con, split, source)
         all_norm_union(con, split)
@@ -675,14 +732,18 @@ def main():
     e_lines, chosen_k = measure_recall(con)
     report.extend(e_lines)
 
-    report.append("\n\n=== Part F: full test candidate generation ===")
-    f_lines = write_test_candidates(con, chosen_k)
-    report.extend(f_lines)
+    if train_only:
+        print("\ntrain-only mode: skipping Part F (full test candidates).")
+    else:
+        report.append("\n\n=== Part F: full test candidate generation ===")
+        f_lines = write_test_candidates(con, chosen_k)
+        report.extend(f_lines)
 
     report_text = "\n".join(report)
     print("\n" + report_text)
-    BLOCKING_REPORT_PATH.write_text(report_text, encoding="utf-8")
-    print(f"\nSaved raw report text to {BLOCKING_REPORT_PATH}")
+    out_path = BLOCKING_REPORT_PATH.with_name("BLOCKING_REPORT_v2_trainonly.md") if train_only else BLOCKING_REPORT_PATH
+    out_path.write_text(report_text, encoding="utf-8")
+    print(f"\nSaved raw report text to {out_path}")
 
     con.close()
 

@@ -1,0 +1,134 @@
+=== Stage x country x script_pair counts ===
+      stage country      script_pair     n
+precut_miss      US      Latin/Latin 43738
+precut_miss   India      Latin/Latin 26215
+precut_miss   India Latin/Devanagari 15117
+precut_miss   India    Latin/Kannada  2045
+precut_miss   India     Latin/Telugu  1809
+precut_miss   India    Latin/Bengali  1787
+precut_miss   India   Latin/Gujarati  1672
+precut_miss   India      Latin/Tamil  1580
+precut_miss   India  Latin/Malayalam  1149
+precut_miss   India       Latin/Odia   515
+cut_by_topk   India      Latin/Latin   503
+precut_miss   India   Latin/Gurmukhi   379
+cut_by_topk      US      Latin/Latin   302
+cut_by_topk   India Latin/Devanagari   103
+cut_by_topk   India     Latin/Telugu    33
+cut_by_topk   India      Latin/Tamil    14
+cut_by_topk   India    Latin/Kannada     9
+cut_by_topk   India   Latin/Gurmukhi     9
+cut_by_topk   India   Latin/Gujarati     4
+cut_by_topk   India    Latin/Bengali     3
+cut_by_topk   India  Latin/Malayalam     2
+
+=== Stage x country totals ===
+      stage country     n
+cut_by_topk   India   680
+cut_by_topk      US   302
+precut_miss   India 52268
+precut_miss      US 43738
+
+=== addr_empty / numbers_disjoint rates by stage ===
+             addr_empty  numbers_disjoint
+stage                                    
+cut_by_topk    0.192464          0.019348
+precut_miss    0.163271          0.172031
+
+=== Examples ===
+
+--- precut_miss / US / Latin/Latin (n=43738) ---
+  S1-529193872: 'Steele Occupational Therapy LLC' | '206 Lake Road, Henryville, IN'
+    S3-125990152: 'therapysteeleoccupational.com' | 'Lake Rd, Henryville, Indiana'
+  S1-680483417: "Amelia's Federal Logistics" | '107 Clear Water, Montgomery, TX'
+    S3-629508078: "Amelia's Federal" | '07 Clear Water, Montgomery, Texas'
+  S1-437474190: 'Valley Legacy Alliance Inc' | 'Albany, 56 Liebel Street, NY'
+    S2-237928421: 'Inc Valley Legacy Alliance' | 'LIEBEL STREET, ALBANY TOWNSSHIP, NY'
+  S1-935370038: 'Cozy Yoga' | '9586 Duanesburg Road, Duanesburg, NY'
+    S2-396397844: 'COZY YOGA' | '9584 DUANESBURG RD, DUANESBURG, NY'
+  S1-603143068: 'A Star Resource Inc' | '515 Ohio Avenue, Nutter Fort, WV'
+    S2-27453091: 'A Inc Resource [Star]' | '51 OHIO AVE, NUTTER FORT, WV'
+
+--- precut_miss / India / Latin/Latin (n=26215) ---
+  S1-172209840: 'Les Exports Private Limited' | 'No.1868, Ground Floor, 7Th Cross 2Ndmain, Gkvk Post, Judicial Layout, Bangalore, Karnataka'
+    S3-260947488: 'Les Private Limited Service' | 'No.18-68, Bangalore, ಕರ್ನಾಟಕ, Bangalore'
+  S1-954212641: 'India Shivpujan Global Limited' | 'C/O Ashish Ashok Rathi Police Reserve Lain, Amaravati, Amravati, Maharashtra'
+    S2-127759030: 'India Shivpujan Global' | 'C/O ASHISH ASHOK RATHI POLICE RESERVE LAIN, AMARAVATI, Maharashtra'
+  S1-94974113: 'Creative Builders Private Limited' | '905, Arcadia Building N.C.P.A. Marg, Nariman Point, Mumbai, Maharashtra'
+    S2-32600678: 'privatecreativebuilders.com' | '905, NARIMAN POINT, MUMBAI, Maharashtra'
+  S1-477373771: 'Apex Technology Private Limited' | 'C/O Kamble Virupaksha, At: Kale (Kasaba), Panhala, Kolhapur, Maharashtra'
+    S2-777194382: 'APEX TECHNOLOGY PRTBA LIMITED' | 'C/O KAMBLE VIRUPAKSHA, AT: KALE (KASABA), PANHALA, Maharashtra'
+  S1-964048476: 'Consultants Om Management Private Limited' | 'C-2/194 - Block C-Ii, New Ashok Nagar, Delhi, West Delhi, Delhi'
+    S3-420633483: 'Vioriza' | 'C-2/19 - Block C-ii, New Ashok Nagar, Delhi, West Delhi, DL'
+
+--- precut_miss / India / Latin/Devanagari (n=15117) ---
+  S1-559631435: 'Eastern Business Pvt Ltd' | 'Pune, Sn 62, 65 Mahatma Society Kothrud, Maharashtra, Pune, Pl 163'
+    S2-114586186: 'ईस्टर्न बिजनेस प्रा. लि.' | 'PL 163, PUNE, महाराष्ट्र'
+  S1-804294181: 'Shiv Logistics Private Limited' | 'Alok Nagar Jaipur House, 13-B, Agra, Uttar Pradesh, Agra'
+    S3-339891519: 'शिव लॉजिस्टिक्स प्राइवेट लिमिटेड' | '3-B, Agra, उत्तर प्रदेश'
+  S1-889180148: 'Al Consultants Private Limited' | 'Uday Kant Jha Panch- Bhauara Vill- Bhoraha, Chakdahnavtoli, Madhubani, Bihar'
+    S2-554700731: 'अल कंसल्टेंट्स प्राइवेट लिमिटेड' | 'CHAKDAHNAVTOLI, UDAY KANT JHA PANCH- BHAUARA VILL- BHORAHA, बिहार, MADHUBANI'
+  S1-804294181: 'Shiv Logistics Private Limited' | 'Alok Nagar Jaipur House, 13-B, Agra, Uttar Pradesh, Agra'
+    S3-470528315: 'शिव लॉजिस्टिक्स Private Limited' | '3-B, Agra, उत्तर प्रदेश'
+  S1-782947632: 'Ram Software Private Limited' | 'C/O Shrinivas Bansilal, Sarswat Station Road, Jalna, Maharashtra'
+    S2-745950224: 'राम सॉफ्टवेयर प्राइवेट लिमिटेड' | 'NO 599 C/O SHRIIVAS BANSILAL, JALNA, Maharashtra'
+
+--- precut_miss / India / Latin/Kannada (n=2045) ---
+  S1-444672565: 'Royal Technology Private Limited' | 'Bangalore, 4Th Cross Road 10Th Main, Indiranagar, 2Nd Stage, Karnataka, Bangalore, No.68'
+    S2-323574114: 'ರಾಯಲ್ ಟೆಕ್ನಾಲಜಿ ಪ್ರೈವೇಟ್ ಲಿಮಿಟೆಡ್' | 'NO.##68, BENGALURU, BANGALORE, Karnataka'
+  S1-804567071: 'Jay Products Private Limited' | 'Flat No 231 Satwis Thavil, Panathur Balagere Road, Bangalore South, Bangalore, Karnataka'
+    S2-673014009: 'ಜೇ ಪ್ರೊಡಕ್ಟ್ಸ್ ಪ್ರೈವೇಟ್ ಲಿಮಿಟೆಡ್' | '#221 SATWIS THAVIL, PANATHUR BALAGERE ROAD, BANGALORE SOUTH, BANGALORE, Karnataka'
+  S1-753059537: 'Fortune Systems Private Limited' | "Bangalore, 10Th 'C' Cross.11Th Main Road, Ii Stage Basaveswarnagar, Bangalore, No.1092, Karnataka"
+    S2-201767131: 'ಫಾರ್ಚೂನ್ ಸಿಸ್ಟಮ್ಸ್ ಪ್ರೈವೇಟ್ ಲಿಮಿಟೆಡ್' | '#1092, BANGLORE, Karnataka'
+  S1-213407622: 'Baba All Media Pvt Ltd' | 'Bangalore, Karnataka, Jalahalli Cross, 684, Tumkur Road'
+    S3-943958382: 'ಬಾಬಾ ಆಲ್ ಮೀಡಿಯಾ ಪ್ರೈವೇಟ್ ಲಿಮಿಟೆಡ್' | '684, Bangalore Rural, Bangalore, KA'
+  S1-741148901: 'Best Sai Consulting Private Limited' | 'Bangalore, Apsara Gold Apartments Akshaya Nagar Begur Road, Near Vinayaka, Temple, Bangalore, Karnataka, No. 003'
+    S2-917091421: 'ಬೆಸ್ಟ್ ಸಾಯಿ ಕನ್ಸಲ್ಟಿಂಗ್ ಪ್ರೈವೇಟ್ ಲಿಮಿಟೆಡ್' | 'NO. 00, BANGALORE, ಕರ್ನಾಟಕ'
+
+--- precut_miss / India / Latin/Telugu (n=1809) ---
+  S1-528250728: 'One Exports Pvt Ltd' | '2C, Chandra Residency, Opp Ashok Gardens Bowenpally, Secunderabad, Hyderabad, Telangana'
+    S3-813536454: 'వన్ Exports Pvt Ltd' | '2C, Hyderabad, TG'
+  S1-509658104: 'Tirupati Estate Private Limited' | '#4-86/5, Sri Lakshmi Venkateswara, Krishna, Andhra Pradesh'
+    S3-369538606: 'తిరుపతి ఎస్టేట్ ప్రైవేట్ లిమిటెడ్' | 'No 4-86/5, Krishna, ఆంధ్రప్రదేశ్'
+  S1-863704872: 'Swastik Properties Private Limited' | 'H No 4-6-137/33/1 P No 89, Sai Nagar East Near Sai Baba Temple, Allwyn Colony, Kukat, Pally, Hyderabad, Telangana'
+    S2-53459415: 'స్వస్తిక్ ప్రాపర్టీస్ ప్రైవేట్ లిమిటెడ్' | 'HYDERABAD, DOOR NO 4-6-137/33/1 P NO 89, HYDERABAD, Telangana'
+  S1-887880266: 'Southern Business' | 'Haritha Priya Restaurant, Near Pondurthi X Road, Narasannapally Mandal, Kamareddy District, Nizamabad, Telangana'
+    S2-68699929: 'సదర్న్ బిజినెస్' | 'NIZAMABAD, HARITHA PRIYA RESTAURANT, NIZAMABAD, Telangana, NEAR PONDURTHI X ROAD, NARASANNAPALLY MANDAL, KAMAREDDY DISTRICT'
+  S1-965419429: 'Guru Services Private Limited' | '5-37(1), Masters Mansion, Opp. Power House Kurnool Road, Ongole, Prakasam, Andhra Pradesh'
+    S2-269066515: 'గురు సర్వీసెస్ ప్రైవేట్ లిమిటెడ్' | '5-37(1), ONGOLE, PRAKASAM, Andhra Pradesh'
+
+--- precut_miss / India / Latin/Bengali (n=1787) ---
+  S1-766847714: 'Smart Sunrise Trading Private Limited' | '5, Bakul Bagan Row, Kolkata, Howrah, West Bengal'
+    S3-48362365: 'স্মার্ট সানরাইজ ট্রেডিং প্রাইভেট লিমিটেড' | '274 5, Calcutta, Howrah, পশ্চিমবঙ্গ'
+  S1-387058330: 'Sree Products Pvt Ltd' | 'Trinity, 226/1, A J C Bose Road 7Th Floor, Kolkata, Howrah, West Bengal'
+    S2-135247550: 'শ্রী প্রোডাক্টস প্রাইভেট লিমিটেড' | 'TRINITY, KOLKATA, HOWRAH, West Bengal'
+  S1-667437335: 'Swastik Marketing LLP' | 'Sreepally, Opp. - Srisangha Club Asansol, Asansol, West Bengal'
+    S2-429992689: 'স্বস্তিক মার্কেটিং এলএলপি' | 'SREEPALLY, OPP. - SRISANGHA CLUB ASANSOL, ASANSOL, পশ্চিমবঙ্গ'
+  S1-96722560: 'Tirupati Solutions' | 'West Bengal, Bulbulchandi Road Mangalbari Malda, Malda, Samiran Barman, Old Malda'
+    S2-428631970: 'তিরুপতি সলিউশনস' | 'SAMIRAN BARMAN, BULBULCHANDI ROAD MANGALBARI MALDA, OLD MALDA, MALDA, West Bengal'
+  S1-714201528: 'East Global Software Limited' | '4 Ahmed Mamuji Street, Liluah Howrah, Uluberia - Ii, Howrah, West Bengal'
+    S2-247451813: 'ইস্ট গ্লোবাল সফটওয়্যার লিমিটেড' | '6 AHMED MAMUJI STREET, LILUAH HOWRAH, ULUBERIA - II, HOWRAH, West Bengal'
+
+--- precut_miss / India / Latin/Gujarati (n=1672) ---
+  S1-124204948: 'Gold Solutions Private Limited' | 'Ebtsl Premises, Er-2 Building(Admn. Building)Salaya 44 Km, P.B. No 7Taluka, Khambhalia, Devbhu, Mi Dwarka, Khambhalia, Jamnagar, Gujarat'
+    S2-648293676: 'ગોલ્ડ સોલ્યુશન્સ પ્રાઇવેટ લિમિટેડ' | 'BLOCK D-430 EBTSL PREMISES, KHAMBHALIA, null, ગુજરાત'
+  S1-11022975: 'Royal Services Private Limited' | '402, Shyamdeep Residency, Sattar Taluka Soc., P.O. Navjivan, Ahmedabad, Gujarat'
+    S2-895488680: 'રોયલ સર્વિસીસ પ્રાઇવેટ લિમિટેડ' | '402, AHMEDABAD, Gujarat'
+  S1-934337981: 'Hari Infotech Private Limited' | 'C-1, Atahar Society Behind Nalanda-3, Waghodiya Road, Vadodara, Gujarat'
+    S3-239184001: 'હરિ ઇન્ફોટેક પ્રાઇવેટ લિમિટેડ' | 'Plot 212. C-1, Baroda, Vadodara, GJ'
+  S1-595818757: 'Digital Power Private Limited' | 'B 506, Shivam 01 Amba Business Park, Sec-2, B/H Dada Bagwan Trimandir, Gandhinagar, Gandhi Nagar, Gujarat'
+    S2-564979966: 'ડિજિટલ પાવર પ્રાઇવેટ લિમિટેડ' | 'B 0506, GANDHINAGAR, GANDHI NAGAR, Gujarat'
+  S1-2836062: 'Supreme Properties Private Limited' | '25, Chitrakut Twin Bunglows Vastrapur, Ahmedabad, Gujarat'
+    S3-282680576: 'સુપ્રીમ પ્રોપર્ટીઝ પ્રાઇવેટ લિમિટેડ' | '25, Ahmedabad, GJ'
+
+--- precut_miss / India / Latin/Tamil (n=1580) ---
+  S1-174336598: 'Super Technologies Private Limited' | 'No 9 Bishop Walle Avenue East Mylapore, Chennai, Tamil Nadu'
+    S2-718260722: 'சூப்பர் டெக்னாலஜீஸ் பிரைவேட் லிமிடெட்' | '25 BISHOP WALLE AVENUE EAST MYLAPORE, MADRAS, CHENNAI, Tamil Nadu'
+  S1-854902999: 'Arihant Technology Private Limited' | 'Chennai, Tamil Nadu, 26/11, Krishnan Street West Mambalam'
+    S2-906589855: 'அரிஹந்த் டெக்னாலஜி பிரைவேட் லிமிடெட்' | 'G-26/11, CHENNAI, Tamil Nadu'
+  S1-883950016: 'Hitech Agro Private Limited' | 'Tirupur, Coimbatore, Tamil Nadu, 19-13, Subbaiya Colony Extn First Street P.N. Road'
+    S3-549846840: 'ஹைடெக் அக்ரோ பிரைவேட் லிமிடெட்' | 'G-19-13, Tirupur, TN'
+  S1-476639597: 'Ace Alpha Management Private Limited' | '1D, No.310 (Old No. 813), Poonamallee High Road, Perambur Purasawalkam, Chennai, Tamil Nadu'
+    S2-474619293: 'ஏஸ் ஆல்ஃபா மேனேஜ்மெண்ட் பிரைவேட் லிமிடெட்' | '1D, PERAMBUR PURASAWALKAM, PURASAWAKKAM, Tamil Nadu'
+  S1-74719683: 'Jain Healthcare Private Limited' | '203/10B, Featherlite The, Address, 8Th Floor, Tambaram, Kanchipuram, Tamil Nadu'
+    S2-322443086: 'ஜைன் ஹெல்த்கேர் பிரைவேட் லிமிடெட்' | '203/10B, KANCHEEPURAM, Tamil Nadu'

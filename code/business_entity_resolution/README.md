@@ -113,6 +113,56 @@ by fixed-size id batches) — this machine has 16 GB RAM and repeatedly hit
 memory/disk limits without it; see `output/BLOCKING_REPORT.md`'s
 "Engineering notes" section for the full story.
 
+## Timings & peak RAM per stage
+
+Measured on this team's dev machine: **Windows laptop, 16 GB RAM (16.8 GB
+as reported by `psutil`), 8 physical / 12 logical CPU cores, CPU only**.
+Wall times are cross-referenced from `output/STEP2_REPORT.md`'s
+cumulative timing table (authoritative for all Step 2 tracks); peak RSS
+figures are from `output/BLOCKING_REPORT.md`'s per-part memory table
+where that finer-grained breakdown exists. Where no peak-RAM number was
+logged for a stage, it's marked "not logged" rather than guessed.
+
+| Stage | Script | Wall time | Peak RAM |
+|---|---|---|---|
+| Step 1: EDA + noise mining + baseline | `first_look.py`, `noise_mining.py`, `sanity_check_metric.py`, `make_empty_submission.py` | seconds-to-low-minutes each (see `output/step1_output.txt`) | not logged |
+| Ingest raw TSVs → parquet | `ingest.py` | ~10s | not logged |
+| Track 1: eval harness + folds/sample | `folds.py`, `evaluate.py` | ~5 min | not logged |
+| Track 2: mine dictionaries | `mine_dicts.py` | ~7 min | <0.25 GB |
+| Track 3a: normalize | `normalize.py` | ~14 min (final run; ~28 min cumulative across the run + the mid-session state-code-bug rerun) | <0.5 GB/worker (`multiprocessing.Pool(4)`) |
+| Track 3b-f: IDF + blocking + candidates | `blocking.py` | ~65 min (final successful run; several hours cumulative across the OOM/segfault/disk-full iterations documented in `BLOCKING_REPORT.md`) | IDF/token tables <1 GB; 300k-sample recall pass (Part E) 1.4 GB; full test candidates (Part F) 3.4 GB |
+| Track 4 Phase 1: feature functions + sanity check | `features.py` | ~15 min | not logged |
+| Track 4 Phase 2: features on real candidates | `features_candidates.py train` / `test` | ~16 min train (×2, one rerun for a missing column), ~102 min test | not logged |
+| Track 5: train + tune + LOCO + predict + validate | `train_model.py` | ~60 min (~43 min train/tune/LOCO + ~17 min test predict/submit/validate) | not logged |
+| Track 5 extra: OOF + worst-20 report | `oof_report.py` | ~11 min | not logged |
+| Package the submission zip | `make_package.py` | seconds (zip/deflate of already-computed outputs; not re-running any pipeline stage) | not logged (dominated by I/O of the ~790 MB `candidate_pairs.tsv`, not compute) |
+
+The "not logged" cells are stages where `perf.py`'s `stage()` timing
+wrapper was used but its RSS logging wasn't captured into either report —
+not evidence those stages are free; `train_model.py` and
+`features_candidates.py` in particular hold multi-million-row feature
+frames and are not expected to be lighter than the Track 3 numbers above.
+
+## Packaging the final submission
+
+Once `output/matching_results.tsv` and `output/candidate_pairs.tsv` are
+final (i.e. Step 3's blocking/model changes are done and the last
+`train_model.py` run reflects them), build the submission zip:
+
+```bash
+.venv/Scripts/python.exe code/business_entity_resolution/src/make_package.py
+```
+
+This writes `<TEAM_NAME>_submission.zip` at the repo root with
+`output/matching_results.tsv` + `output/candidate_pairs.tsv`, a clean copy
+of `code/business_entity_resolution/` (`src/`, excluding `__pycache__`,
+plus `README.md` and `requirements.txt`), and `Documentation_template.md`
+— the exact structure required by the root `README.md`'s "Final
+Submission Package" section. **Edit the `TEAM_NAME` constant at the top of
+`make_package.py` first** — it defaults to the placeholder `"team"`. The
+script prints the full file tree inside the zip and the zip's total size
+when done; it never touches `data/`, `dataset/`, or `.venv/`.
+
 ## Status
 
 Steps 1 and 2 complete. See `output/EDA_REPORT.md` (Step 1),
@@ -122,3 +172,10 @@ numbers, top feature importances, the worst-20-OOF-entities error analysis,
 and "what I'd try next"). Final test submission
 (`output/matching_results.tsv` + `output/candidate_pairs.tsv`) passes
 `utils/validate_submission.py`.
+
+A Step 3 effort is in progress (separate session/teammate) to raise
+blocking recall past the current 90.75% (chiefly non-Devanagari Indian
+script coverage) and refine the model/decision layer; `requirements.txt`
+already reflects an in-progress addition (`indic_transliteration`) from
+that work as of this writing. Re-run `make_package.py` only after that
+work lands and a fresh `train_model.py` run has produced final outputs.

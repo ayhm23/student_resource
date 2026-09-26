@@ -14,3 +14,7 @@ __pycache__/
 # regenerable by re-running the pipeline (see code/business_entity_resolution/README.md).
 output/matching_results.tsv
 output/candidate_pairs.tsv
+
+# Archived past submissions (output/archive/sub*/): same large-file problem
+# as above, kept locally as fallbacks, never pushed.
+output/archive/
