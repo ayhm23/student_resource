@@ -29,7 +29,7 @@ def connect(role="heavy", memory_limit_gb=None, threads=None):
     if memory_limit_gb is None:
         memory_limit_gb = p.duckdb_heavy_gb if role == "heavy" else p.duckdb_light_gb
     if threads is None:
-        threads = p.duckdb_threads
+        threads = p.duckdb_threads_heavy if role == "heavy" else p.duckdb_threads_light
     tmp_dir = SCRATCH_DIR / "duckdb_tmp"
     tmp_dir.mkdir(parents=True, exist_ok=True)
     con = duckdb.connect(str(SCRATCH_DIR / "warehouse.duckdb"))

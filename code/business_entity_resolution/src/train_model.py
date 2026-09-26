@@ -603,6 +603,7 @@ def main():
 
     with stage("stage 1: score all train + test candidates"):
         con.execute(f"SET memory_limit='{prof.duckdb_heavy_gb}GB'")
+        con.execute(f"SET threads={prof.duckdb_threads_heavy}")
         write_split_predictions(con, models1, STAGE1_FEATURES, "train", False, "train_p1_all")
         con.register("_oof1", keys.assign(p=p1_oof))
         con.execute("""
@@ -618,6 +619,7 @@ def main():
         build_stage2_features(con, "train", "train_p1")
         build_stage2_features(con, "test", "test_p1")
         con.execute(f"SET memory_limit='{prof.duckdb_light_gb}GB'")
+        con.execute(f"SET threads={prof.duckdb_threads_light}")
     del keys
 
     # ---- stage 2 ----

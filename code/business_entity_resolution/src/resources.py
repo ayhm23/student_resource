@@ -33,6 +33,7 @@ GB = 1024 ** 3
 # plus the name/address IDF maps (a few million (country, token) entries).
 FEATURE_WORKER_GB = 0.5
 NORMALIZE_WORKER_GB = 0.25
+DUCKDB_GB_PER_THREAD = 1.0
 # Bytes per training cell while the model trains: float32 feature matrix +
 # LightGBM's binned copy + per-fold validation slices.
 TRAIN_BYTES_PER_CELL = 4 * 1.6
@@ -104,7 +105,8 @@ class Profile:
     scratch_free_gb: float
     duckdb_heavy_gb: float
     duckdb_light_gb: float
-    duckdb_threads: int
+    duckdb_threads_heavy: int
+    duckdb_threads_light: int
     workers_features: int
     workers_normalize: int
     s1_batch_size: int
@@ -145,6 +147,11 @@ def profile():
 
     duckdb_heavy = round(max(1.0, budget * 0.70), 1)
     duckdb_light = round(_clip(budget * 0.15, 1.0, 8.0), 1)
+    # DuckDB's window functions and hash joins need working memory PER THREAD;
+    # 12 threads sharing 2 GB ran out of memory where 2 threads sharing 4 GB
+    # had worked. ~1 GB per thread keeps them spillable.
+    threads_heavy = int(_clip(duckdb_heavy // DUCKDB_GB_PER_THREAD, 1, cores))
+    threads_light = int(_clip(duckdb_light // DUCKDB_GB_PER_THREAD, 1, cores))
 
     workers_features = _env_int("BER_WORKERS") or int(_clip(
         (budget - duckdb_light) // FEATURE_WORKER_GB, 1, cores))
@@ -175,7 +182,8 @@ def profile():
         total_ram_gb=round(total_gb, 1), avail_ram_gb=round(avail_gb, 1), budget_gb=round(budget, 1),
         cores=cores, physical_cores=physical,
         scratch_dir=str(scratch), scratch_free_gb=round(scratch_free, 1),
-        duckdb_heavy_gb=duckdb_heavy, duckdb_light_gb=duckdb_light, duckdb_threads=cores,
+        duckdb_heavy_gb=duckdb_heavy, duckdb_light_gb=duckdb_light,
+        duckdb_threads_heavy=threads_heavy, duckdb_threads_light=threads_light,
         workers_features=workers_features, workers_normalize=workers_normalize,
         s1_batch_size=s1_batch, cap_default=cap_default, cap_strict=cap_strict, top_k=top_k,
         train_max_rows=train_max_rows, lgb_threads=physical, predict_batch_rows=predict_batch,
