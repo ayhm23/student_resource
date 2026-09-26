@@ -1,0 +1,122 @@
+
+S1-494930410 (F0.5=0.000): 'Hyacinthe Cusack Energia' | '1951 Nomas Street, TX, Dallas'
+  TRUE matches (1):
+    S2-254788212: 'Hyacinthe Cusack Services' | 'DALLAS, 195 NOMAS ST, PO BOX 7491, TX'
+  PREDICTED (0):
+
+S1-282081437 (F0.5=0.000): 'Forgings Devi Limited' | 'Suryanarayan Villa, Hattala Road, Near Sbi Atm, Kanksa, Bardhaman, West Bengal'
+  TRUE matches (1):
+    S2-222674377: 'M/s Forgings Devi Ltd' | 'SURYANARAYAN VILLA, HATTALA ROAD, NEAR SBI ATM, KANKSA, West Bengal'
+  PREDICTED (0):
+
+S1-630319325 (F0.5=0.000): 'Alpha Foods Private Limited' | 'D No 20 1St Block, 3 Thygaraja Nagara, Bangalore South, Bangalore, Karnataka'
+  TRUE matches (3):
+    S2-708563433: 'ಆಲ್ಫಾ ಫುಡ್ಸ್ ಪ್ರೈವೇಟ್ ಲಿಮಿಟೆಡ್' | 'NO 20 1ST BLOCK, BANGALORE SOUTH, BANGALORE, Karnataka'
+    S3-40305317: 'ಆಲ್ಫಾ ಫುಡ್ಸ್ ಪ್ರೈವೇಟ್ ಲಿಮಿಟೆಡ್' | 'D No 2-0 1St Block, 3 Thygaraja Nagara, Bangalore, KA'
+    S3-912763660: 'ಆಲ್ಫಾ ಫುಡ್ಸ್ ಪ್ರೈವೇಟ್ ಲಿಮಿಟೆಡ್' | 'D No 2-0 1St Bolck, Bangalore, KA'
+  PREDICTED (0):
+
+S1-110704330 (F0.5=0.000): 'Universal Hospitality Private Limited' | 'Mumbai, Flat No.202, Tivoli Co-Op, Hsg Society Ltd Central Avenue, Hiranandani Gardens, Maharashtra, Mumbai City'
+  TRUE matches (3):
+    S2-373005348: 'यूनिवर्सल हॉस्पिटैलिटी प्राइवेट लिमिटेड' | 'DOOR NO #202, MUMBAI, MUMBAI CITY, Maharashtra'
+    S3-667062123: 'यूनिवर्सल हॉस्पिटैलिटी प्राइवेट लिमिटेड' | 'MH, 202, Mumbai, Mumbai City'
+    S3-712307752: 'Universal Hospitality Piirvte Limited' | 'MH, Mumbai, Flat No.202, Mumbai City'
+  PREDICTED (0):
+
+S1-766197558 (F0.5=0.000): 'Apex Exports' | 'Coimbatore, Tamil Nadu, No.36, Arumugam Nagar, Ramanathapuram, Coimbatore'
+  TRUE matches (3):
+    S2-436878675: 'அபெக்ஸ் எக்ஸ்போர்ட்ஸ்' | 'NO.G-36, COIMBATORE, Tamil Nadu'
+    S3-150209940: 'Apex Edoerts' | 'No.3-6, தமிழ்நாடு, Coimbatore'
+    S3-702660426: 'அபெக்ஸ் எக்ஸ்போர்ட்ஸ்' | 'No.3-6, Arumugam Nagar, Ramanathapuram, Coimbatore, Coimbatore, TN'
+  PREDICTED (0):
+
+S1-440777013 (F0.5=0.000): 'Shakti Enterprises Pvt Ltd' | 'Capsulation Premisession Trombay Road, Mumbai, Mumbai City, Maharashtra'
+  TRUE matches (3):
+    S2-261988291: 'शक्ति एंटरप्राइजेज प्रा. लि.' | 'Maharashtra, MUMBAI, MUMBAI CITY, CAPSULATION PREMISESSION TROMBAY ROAD'
+    S2-800638464: 'शक्ति एंटरप्राइजेज प्रा. लि.' | 'CAPSULATION PREMISESSION TROMBAY ROAD, MUMBAI, MUMBAI CITY, Maharashtra'
+    S3-843446014: 'शक्ति एंटरप्राइजेज प्रा. लि.' | 'MH, Capsulation Premisession Trombay Road, Mumbai City, Mumbai'
+  PREDICTED (0):
+
+S1-572016417 (F0.5=0.000): 'Family Institute LLC' | '201 Roby Farm Road, Fl 1, Rocheport, MO'
+  TRUE matches (1):
+    S3-597776501: 'FAMILY INSTITUTE LLC' | ''
+  PREDICTED (0):
+
+S1-792432807 (F0.5=0.000): 'Baba Media Pvt Ltd' | 'Flat No- L-2/1147, Block No- B7, Ashiana Tarang, Bhiwadi, Alwar, Rajasthan'
+  TRUE matches (3):
+    S2-564559843: 'बाबा मीडिया प्रा. लि.' | 'FLAT NO- L-02/1147, ALWAR, BHIWADI, Rajasthan'
+    S3-170838552: 'बाबा मीडिया प्रा. लि.' | 'Flat No- L-2/1147, Rajasthan, RJ'
+    S3-554608864: 'babamedia.com' | 'Flat No- L-2/1147, Bhiwadi, Neemrana, राजस्थान'
+  PREDICTED (0):
+
+S1-240807796 (F0.5=0.000): 'Shree & Co' | 'Flat S3, 2Nd Floor, Sun Enclave Plot 31/32, Vellala Street, Mogappair, Chennai, Tamil Nadu'
+  TRUE matches (3):
+    S2-494828903: 'Veodrex' | 'FLAT S#3, THIRUVALLUR, CHENNAI, Tamil Nadu'
+    S2-865639892: 'SAREE & CO' | 'FLAT S#3, THIRUVALLUR, CHENNAI, Tamil Nadu'
+    S3-874345720: 'Shree & Company' | 'TN, Plot 81 Flat S3, Chennai'
+  PREDICTED (0):
+
+S1-25199250 (F0.5=0.000): 'Titan, LLC' | '114 Savely Court, Hendersonville, TN'
+  TRUE matches (2):
+    S3-407449543: 'Titan, LLC' | 'Tennessee, Hendersonville, 11 Savely Court'
+    S3-931853333: 'Titan, Llc' | '11 Savely Ct, Hendersonville, Tennessee'
+  PREDICTED (0):
+
+S1-964001044 (F0.5=0.000): 'Sosa and Fairchild' | '376 Esser Avenue, Unit Apartment 2, Buffalo, NY'
+  TRUE matches (1):
+    S2-122353740: 'Sosa and Fairchild Services' | '76 ESSER AVE, BUFFALO, NY'
+  PREDICTED (0):
+
+S1-691881769 (F0.5=0.000): 'One Food Pvt Ltd' | 'P-44, Rabindra Sarani 4Th Floor, Room No.408, Kolkata, Kolkata, Howrah, West Bengal'
+  TRUE matches (3):
+    S2-556113530: 'ওয়ান ফুড প্রাইভেট লিমিটেড' | 'P-##44, HOWRAH, KOLKATA, পশ্চিমবঙ্গ'
+    S3-415840640: 'ওয়ান ফুড প্রাইভেট লিমিটেড' | 'P-44, Rabindra Sarani 4Th Floor, Room No.408, Kolkata, Howrah, R.n. Mukherjee Road, WB'
+    S3-997110148: 'ওয়ান ফুড প্রাইভেট লিমিটেড' | 'P-44, Kolkata, R.n. Mukherjee Road, WB'
+  PREDICTED (0):
+
+S1-924549797 (F0.5=0.000): 'Perfect Infra Private Limited' | 'A 03/103, Mangla Greens, Behind Uma Vidhyalaya, Tarsali, Vadodara, Gujarat'
+  TRUE matches (5):
+    S2-174265900: 'પરફેક્ટ ઇન્ફ્રા પ્રાઇવેટ લિમિટેડ' | 'Gujarat, A 03/103, VADODARA'
+    S2-456027447: 'પરફેક્ટ Infra Private Limited' | 'VADODARA, A 03/103, ગુજરાત, VADODARA'
+    S2-71109043: 'પરફેક્ટ ઇન્ફ્રા પ્રાઇવેટ લિમિટેડ' | 'A 03/103, VADODARA, Gujarat'
+    S3-605129540: 'Shri Perfect Infra' | 'Baroda, A 03/103, ગુજરાત, Vadodara'
+    S3-63636584: 'Limited Perfect Private Service' | 'A 03/103, Baroda, Vadodara, GJ'
+  PREDICTED (0):
+
+S1-519813486 (F0.5=0.000): 'Raj Healthcare Limited' | 'Lucknow, Shop C- 11, Kisan Bazar Apna Bazar, Uttar Pradesh'
+  TRUE matches (2):
+    S3-195192091: 'Limited Raj Hea1thcare' | 'Shop C- 011, Lucknow, Makhdoom Pur, उत्तर प्रदेश'
+    S3-363964668: 'Raj हेल्थकेयर Limited' | 'Shop C- 011, Lucknow, Makhdoom Pur, उत्तर प्रदेश'
+  PREDICTED (0):
+
+S1-918483509 (F0.5=0.000): 'Regional Committee' | '3330 Greenway Road, Unit 1038, Phoenix, AZ'
+  TRUE matches (1):
+    S2-429734653: 'Regional Committee' | '03675 GREENWAY RD, PHOENIX, AZ'
+  PREDICTED (0):
+
+S1-439450679 (F0.5=0.000): 'Pediatric Dentistry Physicians Ltd' | '50 Huckleberry Drive, Jackson, WY'
+  TRUE matches (2):
+    S2-935788014: 'PEDIATRIC  DENTISTRY PHYSICIANS' | '1C Huckleberry Drive, JACKSON, WY'
+    S3-8832138: 'Pediatric Dentistry Physicians' | '##1 Huckleberry Drive, Jackson, Wyoming'
+  PREDICTED (0):
+
+S1-962376933 (F0.5=0.000): 'White Investments Private Limited' | 'Delhi, 2122, New Delhi, Plot No. Old 38, Upper Ground Floor, Anaj Mandi, Nai Basti, Narela, Delhi'
+  TRUE matches (1):
+    S2-734808434: 'व्हाइट इन्वेस्टमेंट्स प्राइवेट लिमिटेड' | '2122, Delhi'
+  PREDICTED (0):
+
+S1-711766487 (F0.5=0.000): 'Star Consultancy Private Limited' | '6-3-891/892, 3Rd Floor, Regus The Belvedere Raj Bhavan Road, Somajiguda, Hyderabad, Telangana'
+  TRUE matches (2):
+    S2-981036800: 'స్టార్ కన్సల్టెన్సీ ప్రైవేట్ లిమిటెడ్' | '##6-3-891/892, HYDERABAD, తెలంగాణ'
+    S3-451368797: 'Star-Consultancy Private  Limited' | ''
+  PREDICTED (0):
+
+S1-223610537 (F0.5=0.000): 'Micek, Flores & Lopes' | '13743 46, Tyler, TX'
+  TRUE matches (1):
+    S2-965937870: 'Micek, Flores & Lopes Corporation' | ''
+  PREDICTED (0):
+
+S1-472690373 (F0.5=0.000): 'Maya Institute Group' | '1St Floor, Lentin Chamber Dalal Street, Fort, Mumbai, Maharashtra'
+  TRUE matches (1):
+    S3-762635505: 'Maya Institute Corporation' | ''
+  PREDICTED (0):

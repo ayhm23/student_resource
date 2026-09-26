@@ -1,6 +1,16 @@
 .venv/
 dataset/
+data/
 __pycache__/
 *.parquet
+*.duckdb
+*.duckdb.wal
 *.pyc
 .DS_Store
+
+# Generated submission outputs: large once real predictions are written
+# (candidate_pairs.tsv reflects the full uncapped candidate set the model
+# ran inference over, and can exceed GitHub's 100MB hard limit). Fully
+# regenerable by re-running the pipeline (see code/business_entity_resolution/README.md).
+output/matching_results.tsv
+output/candidate_pairs.tsv

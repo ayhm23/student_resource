@@ -1,0 +1,2 @@
+date,git_commit,description,cv_overall,cv_us,cv_india,loco_us_to_india,loco_india_to_us,public_lb,notes
+2026-09-26,701b63b,"LightGBM 5-fold, decision=relative t=0.65 alpha=0.7",0.9336,0.9496,0.9097,0.7995,0.902,,"blocking recall 90.75% (below 97% target), see BLOCKING_REPORT.md"
