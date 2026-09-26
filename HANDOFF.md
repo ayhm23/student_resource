@@ -21,6 +21,35 @@ HANDOFF.md" — that's enough context to resume without re-deriving anything.
   below). On a bigger machine, things will be much simpler and faster — see
   "If you're now on a better machine" at the bottom.
 
+## TODO (not yet started): the post-bug-fix rebuild chain
+
+Three real bugs (below) were found and fixed in `normalize.py`/`mine_dicts.py`/
+`blocking.py`/`features_candidates.py` on 2026-09-26, but **the rebuild these
+fixes require has NOT been run yet** — code is fixed and pushed (commit
+`d19161c`), data/artifacts are still the pre-fix versions. This is next,
+whenever/wherever (this machine or the lab machine) picks it up:
+
+```bash
+cd student_resource
+.venv/Scripts/python.exe code/business_entity_resolution/src/mine_dicts.py                       # ~7 min
+.venv/Scripts/python.exe code/business_entity_resolution/src/normalize.py                        # ~17 min
+.venv/Scripts/python.exe code/business_entity_resolution/src/blocking.py                         # ~90 min
+.venv/Scripts/python.exe code/business_entity_resolution/src/blocking.py trainfull               # ~90-115 min (NEW, bug #4 fix)
+.venv/Scripts/python.exe code/business_entity_resolution/src/features.py                         # ~15 min
+.venv/Scripts/python.exe code/business_entity_resolution/src/features_candidates.py train        # ~16 min
+.venv/Scripts/python.exe code/business_entity_resolution/src/features_candidates.py patch-competitors  # ~1-2 min (NEW)
+.venv/Scripts/python.exe code/business_entity_resolution/src/features_candidates.py test          # ~100 min
+.venv/Scripts/python.exe code/business_entity_resolution/src/train_model.py                       # ~60 min
+```
+
+**Total estimate: ~6.5-7 hours on this machine** (should be much faster on
+the lab machine once its environment issue is fixed — see "If you're now on
+a better machine"). Cheaper alternative if you just want to validate the
+bug-#1/#3 recall improvement before committing to the full chain: run only
+the first 3 steps above (`mine_dicts.py` → `normalize.py` → `blocking.py
+train-only`, ~114 min) and check `output/BLOCKING_REPORT_v2_trainonly.md`
+for the new recall number before deciding whether to continue.
+
 ## Bugs found + fixed (2026-09-26, this continuation)
 
 A pasted report describing bug fixes made on a different (lab) machine's
