@@ -123,7 +123,8 @@ def featurize_candidates(con, split, scored_table, out_path, with_label):
                 writer = pq.ParquetWriter(str(out_path), table.schema)
             writer.write_table(table)
             n_seen += len(df)
-            print(f"  {scored_table}: {n_seen}/{n_total} featurized")
+            pct = 100.0 * n_seen / n_total if n_total else 100.0
+            print(f"  {scored_table}: {n_seen}/{n_total} featurized ({pct:.1f}% complete)")
     if writer is not None:
         writer.close()
     print(f"  saved -> {out_path}")

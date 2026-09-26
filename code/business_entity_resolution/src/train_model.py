@@ -23,6 +23,7 @@ Pipeline (see ``main()``):
 
 import subprocess
 import sys
+import time
 from datetime import date
 
 import lightgbm as lgb
@@ -65,6 +66,38 @@ LGB_PARAMS = dict(
 NUM_BOOST_ROUND = 2000
 EARLY_STOPPING = 50
 
+_DEVICE_PARAMS_CACHE = {}
+
+
+def detect_lgb_device():
+    """Probe whether this LightGBM build+machine can actually train on GPU; cache the result.
+
+    Tries a tiny real training call with ``device_type='gpu'`` (not just an
+    import/flag check, since the standard PyPI wheel is usually built
+    CPU-only and only errors out once you actually try to use the GPU tree
+    learner) and falls back to plain CPU params if it raises. Prints which
+    device won and why, once, so it's obvious from the log which path was
+    used -- never silently falls back.
+    """
+    if "device_params" in _DEVICE_PARAMS_CACHE:
+        return _DEVICE_PARAMS_CACHE["device_params"]
+
+    probe_X = pd.DataFrame({"x": np.random.rand(200)})
+    probe_y = (probe_X["x"] > 0.5).astype(int)
+    probe_set = lgb.Dataset(probe_X, probe_y)
+    try:
+        lgb.train({"objective": "binary", "verbosity": -1, "device_type": "gpu"},
+                   probe_set, num_boost_round=2)
+        device_params = {"device_type": "gpu"}
+        print("[train_model] GPU detected and usable -- training LightGBM on GPU.")
+    except Exception as exc:
+        device_params = {"device_type": "cpu"}
+        print(f"[train_model] GPU not usable ({type(exc).__name__}: {exc}) -- falling back to CPU. "
+              f"(Common cause: the pip-installed lightgbm wheel is CPU-only; a GPU-enabled build "
+              f"needs a CUDA/OpenCL-compiled install.)")
+    _DEVICE_PARAMS_CACHE["device_params"] = device_params
+    return device_params
+
 T_GRID = np.round(np.arange(0.05, 0.96, 0.05), 2)
 ALPHA_GRID = np.round(np.arange(0.50, 1.00, 0.05), 2)
 
@@ -90,16 +123,19 @@ def load_train_candidates():
 
 def train_cv(df, feature_cols=ALL_FEATURES, seed=SEED):
     """5-fold train (using the pre-assigned fold column), returning OOF probs, models, importances."""
+    device_params = detect_lgb_device()
     oof = np.full(len(df), np.nan)
     models = []
     importances = []
-    for fold in sorted(df["fold"].unique()):
+    folds = sorted(df["fold"].unique())
+    for fold_idx, fold in enumerate(folds):
+        fold_t0 = time.perf_counter()
         tr = df[df["fold"] != fold]
         va = df[df["fold"] == fold]
         train_set = lgb.Dataset(tr[feature_cols], tr["label"], categorical_feature=CATEGORICAL_FEATURES)
         val_set = lgb.Dataset(va[feature_cols], va["label"], categorical_feature=CATEGORICAL_FEATURES,
                                reference=train_set)
-        params = dict(LGB_PARAMS, seed=seed)
+        params = dict(LGB_PARAMS, seed=seed, **device_params)
         model = lgb.train(
             params, train_set, num_boost_round=NUM_BOOST_ROUND, valid_sets=[val_set],
             callbacks=[lgb.early_stopping(EARLY_STOPPING, verbose=False), lgb.log_evaluation(period=0)],
@@ -108,6 +144,9 @@ def train_cv(df, feature_cols=ALL_FEATURES, seed=SEED):
         oof[df["fold"].values == fold] = preds
         models.append(model)
         importances.append(pd.Series(model.feature_importance(importance_type="gain"), index=feature_cols))
+        pct = 100.0 * (fold_idx + 1) / len(folds)
+        print(f"  fold {fold_idx + 1}/{len(folds)} done in {time.perf_counter() - fold_t0:.1f}s "
+              f"({pct:.0f}% of CV training complete)")
     return oof, models, importances
 
 
@@ -224,7 +263,7 @@ def run_loco(df, best_variant, best_t, best_alpha, all_s1_ids_by_country, gt):
             continue
         train_set = lgb.Dataset(train_rows[ALL_FEATURES], train_rows["label"],
                                  categorical_feature=CATEGORICAL_FEATURES)
-        model = lgb.train(dict(LGB_PARAMS, seed=SEED), train_set, num_boost_round=300)
+        model = lgb.train(dict(LGB_PARAMS, seed=SEED, **detect_lgb_device()), train_set, num_boost_round=300)
 
         test_rows = df[df["s1_country"] == test_country]
         test_probs = model.predict(test_rows[ALL_FEATURES])

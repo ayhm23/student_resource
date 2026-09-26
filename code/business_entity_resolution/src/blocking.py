@@ -427,7 +427,21 @@ def build_all_keys(con, split, s1_view, prefix):
     countries = [r[0] for r in con.execute(f"SELECT DISTINCT country FROM v_{split}_S23_norm").fetchall()]
     scored_parts = []
     pairs_raw_parts = []
-    print(f"  [{prefix}] {len(countries)} countries to process: {countries}")
+
+    # Cheap pre-pass so batch progress can report a real overall percentage,
+    # not just position-within-country (which by itself can't tell you if
+    # you're 5% or 90% through the whole run).
+    country_row_counts = {}
+    for country in countries:
+        safe_country = country.replace("'", "''")
+        country_row_counts[country] = con.execute(
+            f"SELECT count(*) FROM {s1_view} WHERE country = '{safe_country}'"
+        ).fetchone()[0]
+    total_batches = sum(max(1, -(-n // S1_BATCH_SIZE)) for n in country_row_counts.values())
+    batches_done = 0
+
+    print(f"  [{prefix}] {len(countries)} countries to process: {countries} "
+          f"({total_batches} total batches across all countries)")
     for i, country in enumerate(countries):
         country_t0 = time.perf_counter()
         print(f"  [{prefix}] country {i + 1}/{len(countries)} ({country}): start")
@@ -480,8 +494,11 @@ def build_all_keys(con, split, s1_view, prefix):
 
             con.execute(f"DROP TABLE IF EXISTS {s1_keys_raw}")
             con.execute(f"DROP TABLE IF EXISTS {s1_keys}")
+            batches_done += 1
+            pct = 100.0 * batches_done / total_batches
             print(f"  [{prefix}] country {i + 1}/{len(countries)} ({country}), "
-                  f"batch {b + 1}/{n_batches}: done in {time.perf_counter() - batch_t0:.1f}s")
+                  f"batch {b + 1}/{n_batches}: done in {time.perf_counter() - batch_t0:.1f}s "
+                  f"-- {batches_done}/{total_batches} batches overall ({pct:.1f}% complete)")
 
         con.execute(f"DROP TABLE IF EXISTS {s23_keys_capped}")
         print(f"  [{prefix}] country {i + 1}/{len(countries)} ({country}): "
