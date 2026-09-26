@@ -459,20 +459,20 @@ def print_examples(con):
     """Print 20 random before/after normalization examples per (split, country)."""
     for split in SPLITS:
         countries = ["US", "India", "France"] if split == "test" else ["US", "India"]
-        union_sql = " UNION ALL ".join(
-            f"""SELECT r.business_name, r.business_address, r.country,
+        norm = norm_parquet_path(split, "S1").as_posix()
+        raw = raw_parquet_path(split, "S1").as_posix()
+        for country in countries:
+            print(f"\n--- {split} / {country}: 20 random S1 before/after examples ---")
+            # Sample 20 ids first, then look up only those rows: joining/sorting
+            # the full sources just to print 20 lines ran out of memory.
+            rows = con.execute(f"""
+                WITH ids AS (SELECT id FROM '{norm}' WHERE country = ? USING SAMPLE reservoir(20 ROWS) REPEATABLE (42))
+                SELECT r.business_name, r.business_address, r.country,
                        n.name_clean, n.name_core, n.name_nospace,
                        n.addr_clean, n.numbers, n.state, n.addr_words
-                FROM '{raw_parquet_path(split, s).as_posix()}' r
-                JOIN '{norm_parquet_path(split, s).as_posix()}' n USING (id)"""
-            for s in SOURCES
-        )
-        for country in countries:
-            print(f"\n--- {split} / {country}: 20 random before/after examples ---")
-            rows = con.execute(
-                f"SELECT * FROM ({union_sql}) WHERE country = ? ORDER BY random() LIMIT 20",
-                [country],
-            ).fetchall()
+                FROM (SELECT * FROM '{raw}' WHERE id IN (SELECT id FROM ids)) r
+                JOIN (SELECT * FROM '{norm}' WHERE id IN (SELECT id FROM ids)) n USING (id)
+            """, [country]).fetchall()
             for r in rows:
                 (bname, baddr, _country, name_clean, name_core, name_nospace,
                  addr_clean, numbers, state, addr_words) = r
