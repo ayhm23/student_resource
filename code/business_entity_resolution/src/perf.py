@@ -32,6 +32,31 @@ def print_sysinfo():
     return low_ram
 
 
+def fmt_hms(seconds):
+    """Format a duration in seconds as H:MM:SS (or M:SS under an hour)."""
+    seconds = int(seconds)
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+def progress_line(label, done, total, start_time):
+    """Build a one-line progress string: done/total, %, elapsed, and an ETA.
+
+    ``start_time`` is a ``time.perf_counter()`` value from when the loop
+    began. The ETA is a simple linear extrapolation from the rate so far
+    (done/elapsed) -- rough by nature (early batches are rarely
+    representative of steady-state speed), but far better than no estimate.
+    """
+    elapsed = time.perf_counter() - start_time
+    pct = 100.0 * done / total if total else 100.0
+    rate = done / elapsed if elapsed > 0 else 0
+    remaining = (total - done) / rate if rate > 0 else float("nan")
+    eta = fmt_hms(remaining) if remaining == remaining else "?"  # NaN check
+    return (f"{label}: {done}/{total} ({pct:.1f}%) | elapsed {fmt_hms(elapsed)} | "
+            f"ETA {eta} remaining")
+
+
 @contextmanager
 def stage(name):
     """Time a pipeline stage and report its wall time and peak process memory.

@@ -31,7 +31,9 @@ import pyarrow.parquet as pq
 from config import FEATURES_DIR, RAW_DIR, TRAIN_GT_LONG_PARQUET, raw_parquet_path
 from db import connect
 from features import WORKERS, compute_pair_features, make_pool
-from perf import print_sysinfo, stage
+import time
+
+from perf import print_sysinfo, stage, progress_line
 
 sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
 
@@ -107,6 +109,7 @@ def featurize_candidates(con, split, scored_table, out_path, with_label):
 
     writer = None
     n_seen = 0
+    t0 = time.perf_counter()
     with make_pool(WORKERS) as pool:
         for batch in result.to_arrow_reader(BATCH_ROWS):
             df = batch.to_pandas()
@@ -123,8 +126,7 @@ def featurize_candidates(con, split, scored_table, out_path, with_label):
                 writer = pq.ParquetWriter(str(out_path), table.schema)
             writer.write_table(table)
             n_seen += len(df)
-            pct = 100.0 * n_seen / n_total if n_total else 100.0
-            print(f"  {scored_table}: {n_seen}/{n_total} featurized ({pct:.1f}% complete)")
+            print(f"  {progress_line(scored_table, n_seen, n_total, t0)}")
     if writer is not None:
         writer.close()
     print(f"  saved -> {out_path}")

@@ -23,7 +23,7 @@ from config import (BLOCKING_REPORT_PATH, CAND_DIR, DICTS_DIR, OUTPUT_DIR,
                      raw_parquet_path)
 from db import connect
 from io_utils import write_id_list_tsv
-from perf import print_sysinfo, stage
+from perf import print_sysinfo, stage, progress_line
 
 random.seed(42)
 
@@ -439,6 +439,7 @@ def build_all_keys(con, split, s1_view, prefix):
         ).fetchone()[0]
     total_batches = sum(max(1, -(-n // S1_BATCH_SIZE)) for n in country_row_counts.values())
     batches_done = 0
+    run_t0 = time.perf_counter()
 
     print(f"  [{prefix}] {len(countries)} countries to process: {countries} "
           f"({total_batches} total batches across all countries)")
@@ -495,10 +496,10 @@ def build_all_keys(con, split, s1_view, prefix):
             con.execute(f"DROP TABLE IF EXISTS {s1_keys_raw}")
             con.execute(f"DROP TABLE IF EXISTS {s1_keys}")
             batches_done += 1
-            pct = 100.0 * batches_done / total_batches
+            batch_dt = time.perf_counter() - batch_t0
             print(f"  [{prefix}] country {i + 1}/{len(countries)} ({country}), "
-                  f"batch {b + 1}/{n_batches}: done in {time.perf_counter() - batch_t0:.1f}s "
-                  f"-- {batches_done}/{total_batches} batches overall ({pct:.1f}% complete)")
+                  f"batch {b + 1}/{n_batches}: done in {batch_dt:.1f}s -- "
+                  f"{progress_line('overall', batches_done, total_batches, run_t0)}")
 
         con.execute(f"DROP TABLE IF EXISTS {s23_keys_capped}")
         print(f"  [{prefix}] country {i + 1}/{len(countries)} ({country}): "

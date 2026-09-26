@@ -37,7 +37,7 @@ from config import (CANDIDATE_PAIRS_PATH, FEATURES_DIR, FOLDS_PARQUET,
 from db import connect
 from evaluate import score
 from io_utils import write_id_list_tsv
-from perf import print_sysinfo, stage
+from perf import print_sysinfo, stage, progress_line
 
 TEST_PREDICT_BATCH_ROWS = 200_000
 
@@ -128,6 +128,7 @@ def train_cv(df, feature_cols=ALL_FEATURES, seed=SEED):
     models = []
     importances = []
     folds = sorted(df["fold"].unique())
+    cv_t0 = time.perf_counter()
     for fold_idx, fold in enumerate(folds):
         fold_t0 = time.perf_counter()
         tr = df[df["fold"] != fold]
@@ -144,9 +145,9 @@ def train_cv(df, feature_cols=ALL_FEATURES, seed=SEED):
         oof[df["fold"].values == fold] = preds
         models.append(model)
         importances.append(pd.Series(model.feature_importance(importance_type="gain"), index=feature_cols))
-        pct = 100.0 * (fold_idx + 1) / len(folds)
-        print(f"  fold {fold_idx + 1}/{len(folds)} done in {time.perf_counter() - fold_t0:.1f}s "
-              f"({pct:.0f}% of CV training complete)")
+        fold_dt = time.perf_counter() - fold_t0
+        print(f"  fold {fold_idx + 1}/{len(folds)} done in {fold_dt:.1f}s -- "
+              f"{progress_line('CV training', fold_idx + 1, len(folds), cv_t0)}")
     return oof, models, importances
 
 
