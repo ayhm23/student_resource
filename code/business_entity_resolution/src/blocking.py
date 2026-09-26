@@ -458,6 +458,38 @@ def score_and_topk(con, split, pairs_table, out_table, top_k=TOP_K_PER_S1):
 S1_BATCH_SIZE = profile().s1_batch_size
 
 
+S23_KEY_CHUNK = S1_BATCH_SIZE * 4
+KEY_SOURCE_COLS = ("source, id, country, state, name_core, name_alt, name_nospace, "
+                   "addr_words, numbers, name_skeleton")
+
+
+def build_s23_keys(con, split, country_view, out_table, i):
+    """S2/S3 key rows for one country, built in record chunks (keys depend only on the record + IDF).
+
+    Ranking every record's tokens in one query needs a window sort over all
+    of a country's S2/S3 tokens at once, which ran out of memory for the US
+    pool at ~2 GB; per-chunk it stays small on any machine.
+    """
+    base = f"{split}_s23_base_c{i}"
+    con.execute(f"CREATE OR REPLACE TABLE {base} AS SELECT {KEY_SOURCE_COLS} FROM {country_view}")
+    n = con.execute(f"SELECT count(*) FROM {base}").fetchone()[0]
+    n_chunks = max(1, -(-n // S23_KEY_CHUNK))
+    parts = []
+    for c in range(n_chunks):
+        con.execute(f"CREATE OR REPLACE VIEW v_{split}_s23_chunk AS "
+                    f"SELECT * FROM {base} WHERE hash(id, source) % {n_chunks} = {c}")
+        raw, keys = f"{out_table}_raw_{c}", f"{out_table}_part_{c}"
+        build_keys_table(con, split, f"v_{split}_s23_chunk", raw)
+        generate_key_rows(con, raw, keys, side="s23")
+        con.execute(f"DROP TABLE IF EXISTS {raw}")
+        parts.append(keys)
+    con.execute(f"CREATE OR REPLACE TABLE {out_table} AS "
+                + " UNION ALL ".join(f"SELECT * FROM {t}" for t in parts))
+    for t in parts + [base]:
+        con.execute(f"DROP TABLE IF EXISTS {t}")
+    print(f"  S2/S3 keys for this country: {n} records in {n_chunks} chunk(s)")
+
+
 def build_all_keys(con, split, s1_view, prefix, keep_raw_filter=None):
     """Build keys, join, and score candidate pairs -- one (country, S1 batch) at a time.
 
@@ -510,12 +542,9 @@ def build_all_keys(con, split, s1_view, prefix, keep_raw_filter=None):
         )
 
         # S2/S3 side: built once, reused by every S1 batch of this country.
-        s23_keys_raw, s23_keys = f"{split}_s23_keys_raw_c{i}", f"{split}_s23_keys_c{i}"
-        s23_keys_capped = f"{split}_s23_keys_capped_c{i}"
-        build_keys_table(con, split, f"v_{split}_S23_norm_part", s23_keys_raw)
-        generate_key_rows(con, s23_keys_raw, s23_keys, side="s23")
+        s23_keys, s23_keys_capped = f"{split}_s23_keys_c{i}", f"{split}_s23_keys_capped_c{i}"
+        build_s23_keys(con, split, f"v_{split}_S23_norm_part", s23_keys, i)
         cap_s23_keys(con, s23_keys, s23_keys_capped)
-        con.execute(f"DROP TABLE IF EXISTS {s23_keys_raw}")
         con.execute(f"DROP TABLE IF EXISTS {s23_keys}")
 
         n_country = con.execute(f"SELECT count(*) FROM v_{split}_s1_country").fetchone()[0]
