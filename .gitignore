@@ -21,3 +21,4 @@ output/archive/
 
 # Pipeline run logs + live status (regenerated every run)
 output/logs/
+.venv-gpu/

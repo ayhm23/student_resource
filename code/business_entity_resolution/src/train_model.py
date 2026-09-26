@@ -91,6 +91,7 @@ NUM_BOOST_ROUND = 3000
 EARLY_STOPPING = 100
 LOCO_ROUNDS = 400
 PREDICT_CHUNK = 1_000_000
+CASCADE_P = 0.005
 
 T_GRID = np.round(np.arange(0.05, 0.96, 0.05), 2)
 ALPHA_GRID = np.round(np.arange(0.40, 1.00, 0.05), 2)
@@ -245,8 +246,21 @@ def predict_chunked(model, X, idx=None):
 
 
 def predict_avg(models, X):
-    return np.mean([m.predict(X, num_iteration=m.best_iteration, num_threads=profile().lgb_threads)
-                    for m in models], axis=0)
+    """Fold-averaged probability, as a cascade: one model scores every row, and only rows it
+    gives >= CASCADE_P are re-scored with the full 5-model average.
+
+    Averaging 5 models x ~1.5k trees over 100M+ candidate rows took hours; almost all rows
+    are near-certain non-matches that no decision rule can ever select (every rule floors at
+    CANDIDATE_FLOOR > CASCADE_P), so their exact averaged value does not matter.
+    """
+    threads = profile().cores
+    p = models[0].predict(X, num_iteration=models[0].best_iteration, num_threads=threads)
+    hot = np.flatnonzero(p >= CASCADE_P)
+    if len(hot) and len(models) > 1:
+        Xh = X[hot]
+        p[hot] = np.mean([m.predict(Xh, num_iteration=m.best_iteration, num_threads=threads)
+                          for m in models], axis=0)
+    return p
 
 
 def build_dataset(X, y, features):
@@ -276,6 +290,14 @@ def train_cv(full, X, y, fold, features, label):
         print(f"  [{label}] fold {i + 1}/{len(folds)}: best_iter={model.best_iteration} -- "
               f"{progress_line('CV', i + 1, len(folds), t0)}")
     return oof, models, pd.concat(importances, axis=1).mean(axis=1).sort_values(ascending=False)
+
+
+def save_models(models, name):
+    """Persist fold models (LightGBM text format) to data/models/ for reuse and inspection."""
+    out = DATA_DIR / "models"
+    out.mkdir(parents=True, exist_ok=True)
+    for i, m in enumerate(models):
+        m.save_model(str(out / f"{name}_fold{i}.txt"), num_iteration=m.best_iteration)
 
 
 def write_split_predictions(con, models, features, split, with_stage2, table):
@@ -597,6 +619,7 @@ def main():
     with stage("stage 1: 5-fold LightGBM"):
         full = build_dataset(X, y, STAGE1_FEATURES)
         p1_oof, models1, imp1 = train_cv(full, X, y, fold, STAGE1_FEATURES, "stage1")
+        save_models(models1, "stage1")
     with stage("LOCO check (stage 1)"):
         loco_lines = run_loco(full, X, keys, y, training_s1, gt)
     del full, X
@@ -628,6 +651,7 @@ def main():
     with stage("stage 2: 5-fold LightGBM"):
         full = build_dataset(X, y, STAGE2_FEATURES)
         p2_oof, models2, imp2 = train_cv(full, X, y, fold, STAGE2_FEATURES, "stage2")
+        save_models(models2, "stage2")
     del full, X
     p2_cal = cross_fit_isotonic(p2_oof, y, fold)
     iso_full = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0).fit(p2_oof, y)
