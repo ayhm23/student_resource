@@ -145,8 +145,14 @@ def profile():
     scratch.mkdir(parents=True, exist_ok=True)
     scratch_free = shutil.disk_usage(scratch).free / GB
 
-    duckdb_heavy = round(max(1.0, budget * 0.70), 1)
-    duckdb_light = round(_clip(budget * 0.15, 1.0, 8.0), 1)
+    # DuckDB's memory_limit is a ceiling it grows into (and spills past), not a
+    # reservation, and some operators (big aggregates, window sorts) fail
+    # outright below a few GB. So its caps get a floor of a fraction of TOTAL
+    # RAM even when little is free right now -- the OS pages if it must -- while
+    # things that really stay resident (worker processes, training matrices)
+    # stay tied to the free-RAM budget.
+    duckdb_heavy = round(max(1.0, budget * 0.70, 0.25 * total_gb), 1)
+    duckdb_light = round(_clip(max(budget * 0.15, 0.10 * total_gb), 1.0, 8.0), 1)
     # DuckDB's window functions and hash joins need working memory PER THREAD;
     # 12 threads sharing 2 GB ran out of memory where 2 threads sharing 4 GB
     # had worked. ~1 GB per thread keeps them spillable.
