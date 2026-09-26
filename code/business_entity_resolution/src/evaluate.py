@@ -16,7 +16,7 @@ from config import RAW_DIR, TRAIN_GT_WIDE_PARQUET, TRAIN_SAMPLE_S1_PARQUET, raw_
 from io_utils import f05, split_ids
 from perf import print_sysinfo, stage
 
-sys.stdout.reconfigure(encoding="utf-8")
+sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
 
 
 ID_LIST_COLUMNS = ("pred_ids", "matched_entity_ids")

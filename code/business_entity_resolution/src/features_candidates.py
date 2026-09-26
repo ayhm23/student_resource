@@ -33,7 +33,7 @@ from db import connect
 from features import WORKERS, compute_pair_features, make_pool
 from perf import print_sysinfo, stage
 
-sys.stdout.reconfigure(encoding="utf-8")
+sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
 
 BATCH_ROWS = 100_000
 

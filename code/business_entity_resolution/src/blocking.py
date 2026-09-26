@@ -15,6 +15,7 @@ Pipeline (see ``main()``):
 
 import random
 import sys
+import time
 
 from config import (BLOCKING_REPORT_PATH, CAND_DIR, DICTS_DIR, OUTPUT_DIR,
                      TEST_CANDIDATES_PARQUET, TRAIN_GT_LONG_PARQUET,
@@ -26,7 +27,11 @@ from perf import print_sysinfo, stage
 
 random.seed(42)
 
-sys.stdout.reconfigure(encoding="utf-8")
+# line_buffering=True: when stdout is redirected to a file (every background
+# run in this project is), Python otherwise fully-buffers output and none of
+# the per-country/per-batch progress prints below actually reach the file
+# until the whole process exits -- which defeats the point of adding them.
+sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
 
 TOP_NAME_TOKENS = 2
 TOP_ADDR_WORDS = 2
@@ -278,7 +283,12 @@ def cap_s23_keys(con, s23_key_table, out_table):
         )
         SELECT k.* FROM {s23_key_table} k
         JOIN counts c USING (key_type, key_value)
-        WHERE c.n <= CASE WHEN k.key_type IN ('K2_nostate', 'K4_nostate', 'K5_nostate') THEN {CAP_K2_NOSTATE} ELSE {CAP_DEFAULT} END
+        -- K6 (sorted rare-token-pair, no address) also gets the stricter cap:
+        -- Step 3 Track A6 measurement showed it alone reaches 44.9% recall,
+        -- meaning it produces large, redundant blocks in dense countries
+        -- (India); that same leakiness pushed a full test run past a 116GB
+        -- temp-disk limit even with per-batch chunking.
+        WHERE c.n <= CASE WHEN k.key_type IN ('K2_nostate', 'K4_nostate', 'K5_nostate', 'K6') THEN {CAP_K2_NOSTATE} ELSE {CAP_DEFAULT} END
     """)
 
 
@@ -389,7 +399,8 @@ def score_and_topk(con, split, pairs_table, out_table, top_k=TOP_K_PER_S1):
     """)
 
 
-S1_BATCH_SIZE = 150_000
+S1_BATCH_SIZE = 75_000  # halved after adding K5/K6: their extra candidate
+# volume pushed a 150k-row batch past a 116GB temp-disk limit on Part F
 
 
 def build_all_keys(con, split, s1_view, prefix):
@@ -416,7 +427,10 @@ def build_all_keys(con, split, s1_view, prefix):
     countries = [r[0] for r in con.execute(f"SELECT DISTINCT country FROM v_{split}_S23_norm").fetchall()]
     scored_parts = []
     pairs_raw_parts = []
+    print(f"  [{prefix}] {len(countries)} countries to process: {countries}")
     for i, country in enumerate(countries):
+        country_t0 = time.perf_counter()
+        print(f"  [{prefix}] country {i + 1}/{len(countries)} ({country}): start")
         # CREATE VIEW can't take a prepared-statement parameter (DuckDB
         # BinderException) -- inline the literal, escaping any single quote.
         safe_country = country.replace("'", "''")
@@ -445,7 +459,10 @@ def build_all_keys(con, split, s1_view, prefix):
             SELECT *, (row_number() OVER (ORDER BY id) - 1) // {S1_BATCH_SIZE} AS _batch
             FROM v_{split}_s1_country
         """)
+        print(f"  [{prefix}] country {i + 1}/{len(countries)} ({country}): {n_country} S1 rows, "
+              f"{n_batches} batch(es) of up to {S1_BATCH_SIZE}")
         for b in range(n_batches):
+            batch_t0 = time.perf_counter()
             con.execute(
                 f"CREATE OR REPLACE VIEW v_{split}_s1_batch AS "
                 f"SELECT * EXCLUDE (_batch) FROM v_{split}_s1_country_numbered WHERE _batch = {b}"
@@ -463,8 +480,12 @@ def build_all_keys(con, split, s1_view, prefix):
 
             con.execute(f"DROP TABLE IF EXISTS {s1_keys_raw}")
             con.execute(f"DROP TABLE IF EXISTS {s1_keys}")
+            print(f"  [{prefix}] country {i + 1}/{len(countries)} ({country}), "
+                  f"batch {b + 1}/{n_batches}: done in {time.perf_counter() - batch_t0:.1f}s")
 
         con.execute(f"DROP TABLE IF EXISTS {s23_keys_capped}")
+        print(f"  [{prefix}] country {i + 1}/{len(countries)} ({country}): "
+              f"ALL batches done in {time.perf_counter() - country_t0:.1f}s")
 
     # kept (not dropped per-batch) since measure_recall's per-key-type
     # recall breakdown needs the raw, un-aggregated key hits

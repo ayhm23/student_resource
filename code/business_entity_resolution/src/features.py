@@ -55,7 +55,7 @@ from config import DICTS_DIR, FEATURES_DIR, RAW_DIR, raw_parquet_path
 from db import connect
 from perf import print_sysinfo, stage
 
-sys.stdout.reconfigure(encoding="utf-8")
+sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
 
 WORKERS = 2  # conservative: this machine is often down to a few GB free RAM
 POOL_CHUNKSIZE = 2000

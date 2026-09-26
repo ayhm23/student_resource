@@ -28,7 +28,7 @@ from config import raw_parquet_path
 from db import connect
 from perf import print_sysinfo, stage
 
-sys.stdout.reconfigure(encoding="utf-8")
+sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
 
 SCRIPT_RANGES = [
     ("Devanagari", 0x0900, 0x097F),

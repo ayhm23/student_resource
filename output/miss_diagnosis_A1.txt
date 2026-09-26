@@ -94,7 +94,7 @@ precut_miss    0.163271          0.172031
     S2-53459415: 'స్వస్తిక్ ప్రాపర్టీస్ ప్రైవేట్ లిమిటెడ్' | 'HYDERABAD, DOOR NO 4-6-137/33/1 P NO 89, HYDERABAD, Telangana'
   S1-887880266: 'Southern Business' | 'Haritha Priya Restaurant, Near Pondurthi X Road, Narasannapally Mandal, Kamareddy District, Nizamabad, Telangana'
     S2-68699929: 'సదర్న్ బిజినెస్' | 'NIZAMABAD, HARITHA PRIYA RESTAURANT, NIZAMABAD, Telangana, NEAR PONDURTHI X ROAD, NARASANNAPALLY MANDAL, KAMAREDDY DISTRICT'
-  S1-965419429: 'Guru Services Private Limited' | '5-37(1), Masters Mansion, Opp. Power House Kurnool Road, Ongole, Prakasam, Andhra Pradesh'
+  S1-965419429: 'Guru Serv ices Private Limited' | '5-37(1), Masters Mansion, Opp. Power House Kurnool Road, Ongole, Prakasam, Andhra Pradesh'
     S2-269066515: 'గురు సర్వీసెస్ ప్రైవేట్ లిమిటెడ్' | '5-37(1), ONGOLE, PRAKASAM, Andhra Pradesh'
 
 --- precut_miss / India / Latin/Bengali (n=1787) ---

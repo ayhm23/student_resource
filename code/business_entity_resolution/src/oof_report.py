@@ -20,7 +20,7 @@ from config import FEATURES_DIR, OUTPUT_DIR, TRAIN_GT_LONG_PARQUET, raw_parquet_
 from io_utils import f05, split_ids
 from perf import print_sysinfo, stage
 
-sys.stdout.reconfigure(encoding="utf-8")
+sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
 
 BEST_VARIANT, BEST_T, BEST_ALPHA = "relative", 0.65, 0.7
 

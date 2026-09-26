@@ -36,7 +36,7 @@ from config import RAW_DIR, DICTS_DIR, raw_parquet_path
 from db import connect
 from perf import print_sysinfo, stage
 
-sys.stdout.reconfigure(encoding="utf-8")
+sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
 
 JOINED_PAIRS_PARQUET = RAW_DIR / "train_gt_joined.parquet"
 BATCH_ROWS = 200_000

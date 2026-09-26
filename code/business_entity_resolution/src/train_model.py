@@ -40,7 +40,7 @@ from perf import print_sysinfo, stage
 
 TEST_PREDICT_BATCH_ROWS = 200_000
 
-sys.stdout.reconfigure(encoding="utf-8")
+sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
 
 SEED = 42
 NUMERIC_FEATURES = [

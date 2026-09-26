@@ -20,7 +20,7 @@ from indic_transliteration.sanscript import transliterate
 from config import RAW_DIR
 from perf import print_sysinfo, stage
 
-sys.stdout.reconfigure(encoding="utf-8")
+sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
 
 SCRIPT_RANGES = [
     ("Devanagari", 0x0900, 0x097F, sanscript.DEVANAGARI),

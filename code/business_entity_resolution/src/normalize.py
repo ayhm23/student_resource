@@ -42,7 +42,7 @@ from config import (DICTS_DIR, NORM_DIR, SOURCES, SPLITS, norm_parquet_path,
 from db import connect
 from perf import print_sysinfo, stage
 
-sys.stdout.reconfigure(encoding="utf-8")
+sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
 
 CHUNK_ROWS = 100_000
 POOL_CHUNKSIZE = 2000

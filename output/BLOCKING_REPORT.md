@@ -1,342 +1,142 @@
-# Step 2 (Track 3) Report — Normalization + Blocking
+=== Part E: recall measurement on 300k train S1 sample vs full train pools ===
+Sample S1 entities: 300000
+True (S1,match) pairs among sample: 1037463, across 283216 non-singleton S1 entities
 
-Pipeline: `src/mine_dicts.py` (Part A) → `src/normalize.py` (Part B) →
-`src/blocking.py` (Parts C–F). All numbers below are from real runs over the
-full dataset (2.2M/5.0M/5.3M train S1/S2/S3, 1.7M/4.9M/5.1M test S1/S2/S3),
-using only training ground truth for anything "mined". No external data.
+Pair recall BEFORE top-K cut (per key type, and union):
+  K1: 779401/1037463 (75.13%)
+  K2: 392494/1037463 (37.83%)
+  K2_nostate: 28/1037463 (0.00%)
+  K3_exact: 481703/1037463 (46.43%)
+  K3_pfx8: 376882/1037463 (36.33%)
+  K4_exact: 9962/1037463 (0.96%)
+  K4_state: 18050/1037463 (1.74%)
+  K5: 250890/1037463 (24.18%)
+  K5_nostate: 14/1037463 (0.00%)
+  K6: 390560/1037463 (37.65%)
+  UNION (any key): 946569/1037463 (91.24%)
 
-## Part A — Dictionaries mined from train pairs
+Union recall BEFORE cut, by country:
+  US: 580496/622464 (93.26%)
+  India: 366073/414999 (88.21%)
 
-Source: `data/dicts/mining_summary.txt`, mined from all 7,638,365 train
-matched pairs.
+Union recall BEFORE cut, by match source:
+  S3: 489994/535974 (91.42%)
+  S2: 456575/501489 (91.04%)
 
-**Devanagari→Latin token maps** (support≥5, agreement≥70%): 12 name tokens
-kept (out of 13 seen in 855 equal-length dev/Latin name pairs), 3 address
-tokens kept (out of 20 seen in 31,715 pairs — most address tokens didn't
-reach 70% agreement, consistent with address component reordering noted in
-Step 1). **Coverage**: only 18.8% of train / 18.7% of test Devanagari token
-*occurrences* are covered by these maps (13.3% of distinct tokens); the rest
-fall back to `unidecode`. This ceiling is a real limitation — see "what I'd
-try next".
+Union recall AFTER top-K cut, swept over K:
+  K=10: 912452/1037463 (87.95%)
+  K=20: 932435/1037463 (89.88%)
+  K=30: 939166/1037463 (90.53%)
+  K=40: 942574/1037463 (90.85%)
+  K=60: 945544/1037463 (91.14%)
 
-**Address abbreviations**: all 13 candidates verified with high support
-(road→rd 421,797 hits, street→st 432,131, ... parkway→pkwy 10,554 — full
-list in `data/dicts/address_abbrev_map.json`).
+No swept K reached 97% union recall; largest K=60 achieved only 91.14%. See 'what I'd try next' in the report.
 
-**State maps**: US 44/50 verified (dropped: hawaii, michigan, mississippi,
-nevada, new hampshire, new jersey — genuinely low train volume, not a
-matching bug). India 19/35 verified (dropped: jharkhand, chhattisgarh, assam,
-uttarakhand, himachal pradesh, goa, tripura, meghalaya, manipur, nagaland,
-mizoram, sikkim, arunachal pradesh, jammu and kashmir, puducherry,
-chandigarh). A real bug was caught and fixed here: the first verification
-pass used token-set intersection, which structurally cannot detect
-multi-word candidates ("new hampshire", "tamil nadu", etc.) — every
-multi-word US/India state was silently failing verification. Fixed by
-switching to a longest-first regex-alternation match over the joined token
-stream; multi-word states then verified correctly (e.g. "north carolina"→nc,
-"tamil nadu"→tn).
+At K=60: non-singleton S1 with ALL true matches found: 220741/283216 (77.94%); with >=1 found: 278534/283216 (98.35%)
 
-**Name wrappers**: top separators (train frequency) — `the`:50,441,
-`as`:28,068, `dba`:20,915, `f/k/a`:15,110, `formerly`:14,967, `aka`:10,604,
-`a/k/a`:10,400, `d/b/a`:10,342, plus Indian honorifics appearing mid-string
-(sri/smt/m/s/shri/mr/dr, ~8,300 each — these overlap with Task 5's
-honorifics list, appearing both as separators and as leading tokens).
-Bigram separators: `business as`:10,352, `trading as`:10,234, `known
-as`:7,480.
+Candidates per S1 at K=60: mean=32.9, median=32, p95=60, max=60, total candidate pairs=9835890
 
-**Legal forms / filler words / honorifics** (train frequency as
-first/last token): legal forms dominated by `limited` (1,423,460), `llc`
-(1,164,088), `inc` (853,791), `ltd` (831,584); French forms added by hand
-(sarl/sas/sasu/eurl/sa/snc/sci) show ~0 train support as expected (no
-French training data) and are trusted for test-time use only. Honorifics
-m/s, dr, smt, shri, sri, mr all appear ~54-55k times each as the first name
-token — a clear, consistent Indian-proprietorship naming pattern.
+30 random MISSED true pairs (never matched by any key), out of 90894 total misses:
+  [no shared name token AND no shared number]
+    S1-675933180: 'Dynamic International Private Limited' | 'Kuba Khurdh Rajgarh, Mirzapur, Mirzapur, Uttar Pradesh, Mirzapur, C.O Sri Kadam Singh'  (name_core='dynamic international private', addr_words='kuba khurdh rajgarh mirzapur c o sri kadam singh', numbers='', state='up')
+    S3-835996472: 'डायनामिक इंटरनेशनल प्राइवेट लिमिटेड' | 'C.o Sri Kadam Singh, Mirzapur, NULL, उत्तर प्रदेश'  (name_core='ddaaynaamaaik inttrneshnl praaivett limaaittedd', addr_words='c o sri kadam singh mirzapur null uttr prdepradesh', numbers='', state='')
+  [no shared number]
+    S1-381171331: 'First Gulf Live' | '2259 Island Drive, North Topsail Beach, NC'  (name_core='first gulf live', addr_words='island north topsail beach', numbers='2259', state='nc')
+    S2-129094896: 'FIRST 6ÚLF LIVE' | 'ISLAND DRIVE, NORTH TOPSAIL BEACH, NC'  (name_core='first 6ulf live', addr_words='island north topsail beach', numbers='', state='nc')
+  [no shared number]
+    S1-36627397: 'Family Associates Inc' | '1811 Lafayette Place, Unit A6, Columbus, OH'  (name_core='family associates', addr_words='lafayette unit a6 columbus', numbers='6,1811', state='oh')
+    S2-338926858: 'FAMILY INC (ASSOCIATES)' | 'LAFAYETTE PL, COLUMBUS, OH'  (name_core='family associates', addr_words='lafayette columbus', numbers='', state='oh')
+  [no shared name token AND no shared number]
+    S1-146257685: 'Digital Finance Private Limited' | 'Niranjan Avenmue Qadian Road, Batala, Gurdaspur, Punjab'  (name_core='digital finance private', addr_words='niranjan avenmue qadian batala gurdaspur', numbers='', state='pb')
+    S3-552088847: 'ਡਿਜੀਟਲ ਫਾਈਨੈਂਸ ਪ੍ਰਾਈਵੇਟ ਲਿਮਟਿਡ' | 'Niranjan Avenmue Qadian Road, Batala, PB, Gurdaspur'  (name_core='ddijiittl phaaiinains praaiiveett limttidd', addr_words='niranjan avenmue qadian batala gurdaspur', numbers='', state='pb')
+  [shared tokens/numbers exist but all keys still missed (rare-word/cap edge case)]
+    S1-565071385: 'Jai Estate Private Limited' | '57, Mother Teresa Street Jak Nagar, Thirumullaivoyal, Chennai, Tamil Nadu'  (name_core='jai estate private', addr_words='mother teresa jak nagar thirumullaivoyal chennai', numbers='57', state='tn')
+    S3-131032578: 'Jai Ebstase Private Limited' | '57, Chennai, TN'  (name_core='jai ebstase private', addr_words='chennai', numbers='57', state='tn')
+  [no shared name_core token]
+    S1-161445087: 'Digital Engineering LLP' | 'Room No.1, Plot No.421, Ground Floor Parvati Bhawan, Keuta Sahi Chhaka, Old T, Own, Bhubaneswar, Khordha, Orissa'  (name_core='digital engineering llp', addr_words='room ground floor parvati bhawan keuta sahi chhaka old t own bhubaneswar khordha', numbers='1,421', state='od')
+    S2-212710087: 'ଡିଜିଟାଲ୍ ଇଞ୍ଜିନିୟରିଂ ଏଲ୍\u200cଏଲ୍\u200cପି' | 'ROOM NO.1, KHORDHA, BHUBANESWAR, ଓଡ଼ିଶା'  (name_core='ddijittaal inyjiniyyrin elelpi', addr_words='room khordha bhubaneswar odd ishaa', numbers='1', state='')
+  [no shared name token AND no shared number]
+    S1-439700278: 'Empire Valley Zhejiang' | '148 Bagdad Road, Unit 230, Leander, TX'  (name_core='zhejiang', addr_words='bagdad unit leander', numbers='148,230', state='tx')
+    S2-330673541: 'Empire Va1ley  Zhejang' | 'BAGDAD RD, LEANDER, TX'  (name_core='empire va1ley zhejang', addr_words='bagdad leander', numbers='', state='tx')
+  [no shared number]
+    S1-502169689: 'Little Bike Shop LLC' | 'ME, Biddeford, 349 Guinea Road'  (name_core='little bike shop', addr_words='biddeford guinea', numbers='349', state='me')
+    S3-435408097: 'Little Bike Shop Llc Trading' | ''  (name_core='little bike shop trading', addr_words='', numbers='', state='')
+  [no shared name token AND no shared number]
+    S1-602953298: 'Krishna Business Private Limited' | 'C/O Bimal Prasad Gupta Vill : Pakuahat, Malda, West Bengal'  (name_core='krishna business private', addr_words='c o bimal prasad gupta vill pakuahat malda', numbers='', state='wb')
+    S2-371268933: 'কৃষ্ণ বিজনেস প্রাইভেট লিমিটেড' | 'C/O BIMAL PRASAD GUPTA VILL : PAKUAHAT, MALDA, West Bengal'  (name_core='krssnn bijnes praaibhett limittedd', addr_words='c o bimal prasad gupta vill pakuahat malda', numbers='', state='wb')
+  [no shared number]
+    S1-120031434: 'Colonial Fellowship LLC' | '488 Betts Bridge Road, West Pawlet, VT'  (name_core='colonial fellowship', addr_words='betts bridge west pawlet', numbers='488', state='vt')
+    S3-34530811: 'Colonial Fellowship Fellowship LLC' | 'Betts Bridge Rd, W Ppawlet, Vermont'  (name_core='colonial fellowship', addr_words='betts bridge w ppawlet', numbers='', state='vt')
+  [no shared number]
+    S1-923303276: 'Integrated Chile Inc.' | '704 Vine Street, Murfreesboro, TN'  (name_core='integrated chile', addr_words='vine murfreesboro', numbers='704', state='tn')
+    S2-13133739: 'Integrated Chi1e Inc.' | 'MURFREESBORO, TN, 705 VINE STREET'  (name_core='integrated chi1e', addr_words='murfreesboro vine', numbers='705', state='tn')
+  [no shared name_core token]
+    S1-637281127: 'Bharat Power Private Limited' | '1004, Parshwnath Business Park Nr. Auda Garden, Prahladnagar Vejalpur, Ahmedabad, Gujarat'  (name_core='bharat power private', addr_words='parshwnath business park nr auda garden prahladnagar vejalpur ahmedabad', numbers='1004', state='gj')
+    S3-648359953: 'ભારત પાવર પ્રાઇવેટ લિમિટેડ' | '1004, Ahmedabad, GJ'  (name_core='bhaart paavr praaivett limittedd', addr_words='ahmedabad', numbers='1004', state='gj')
+  [no shared number]
+    S1-558165746: 'Gilemette Cooper, DDS, PC' | '4317 Washington Street, Unit APT 32, Indianapolis, IN'  (name_core='gilemette cooper dds', addr_words='unit apt indianapolis in', numbers='32,4317', state='wa')
+    S2-401733856: 'Gi1emette Cooper, DDS, PC' | '317 Washington St, INDIANAPOLIS, IN'  (name_core='gi1emette cooper dds', addr_words='indianapolis in', numbers='317', state='wa')
+  [no shared number]
+    S1-4637566: 'Software Solo Plastic Malegaon' | 'At Post Chaugaon, Tal Baglan, Satana, Malegaon, Nashik, Maharashtra'  (name_core='software solo plastic malegaon', addr_words='at post chaugaon tal baglan satana malegaon nashik', numbers='', state='mh')
+    S2-825980308: 'Software Som Plastic (Malegaon)' | 'AT POST CHAUGAON, TAL BAGLAN, SATANA, MALEGAON, महाराष्ट्र'  (name_core='software som plastic malegaon', addr_words='at post chaugaon tal baglan satana malegaon mhaaraassttr', numbers='', state='')
+  [no shared name_core token]
+    S1-812620515: 'Unique Developers Private Limited' | '24/1583, Edavalath Thazham Thondayad, Chevarambalam P.O, Kozhikode, Kerala'  (name_core='unique developers private', addr_words='edavalath thazham thondayad chevarambalam p o kozhikode', numbers='24,1583', state='kl')
+    S2-691165946: 'യുണീക്ക് ഡെവലപ്പേഴ്സ് പ്രൈവറ്റ് ലിമിറ്റഡ്' | '24/1583, KOZHIKODE, Kerala'  (name_core='yunniikk ddevlppeellls praivrrrr limirrrrdd', addr_words='kozhikode', numbers='24,1583', state='kl')
+  [no shared number]
+    S1-699256542: 'Heart Alliance LLC' | '10161 Liberty Road, Liberty, NC'  (name_core='heart alliance', addr_words='liberty', numbers='10161', state='nc')
+    S2-516959746: 'Heart Álliance' | '10195 LIBERTY RD, NC, LIBERTY'  (name_core='heart alliance', addr_words='liberty', numbers='10195', state='nc')
+  [no shared number]
+    S1-301318789: 'National Association LLC' | '2822 79, Colesville, NY'  (name_core='national association', addr_words='colesville', numbers='79,2822', state='ny')
+    S2-383790236: 'NATIONAL LLC ASSOCIATION' | ''  (name_core='national association', addr_words='', numbers='', state='')
+  [no shared name_core token]
+    S1-809447271: 'Gujarat Care Private Limited' | 'Sr No. 87/1/1, Fl No 203, Nandani Takale Nagar, Haveli, Pune, Maharashtra'  (name_core='gujarat care private', addr_words='sr fl nandani takale nagar haveli pune', numbers='1,87,203', state='mh')
+    S2-47809782: 'गुजरात केयर प्राइवेट लिमिटेड' | 'DOOR NO 304 SR NO. 87/1/1, PUNE REGION, PUNE, Maharashtra'  (name_core='gujraat keyr praaivett limaaittedd', addr_words='sr pune region', numbers='1,87,304', state='mh')
+  [shared tokens/numbers exist but all keys still missed (rare-word/cap edge case)]
+    S1-909034211: 'Laxmi Services Private Limited' | '416, Platinum Plaza, Nr. Shakti Enclave, Ahmadabad City, Ahmedabad, Gujarat'  (name_core='laxmi services private', addr_words='platinum plaza nr shakti enclave ahmadabad ahmedabad', numbers='416', state='gj')
+    S3-881323095: 'LAXMI 5ERVICES PRIVATE LIMITED' | 'ગુજરાત, Ahmadabad City, 416, Ahmedabad'  (name_core='laxmi 5ervices private', addr_words='gujraat ahmadabad ahmedabad', numbers='416', state='')
+  [no shared number]
+    S1-280896920: 'Family Precision Clinic Inc' | 'NC, Apex, 400 Homestead Park Drive'  (name_core='family precision clinic', addr_words='apex homestead park', numbers='400', state='nc')
+    S2-561859228: 'Family Percision Clinic Inc' | 'APEX, NC, 399 HOMESTEAD PARK DRIVE'  (name_core='family percision clinic', addr_words='apex homestead park', numbers='399', state='nc')
+  [no shared number]
+    S1-186535878: 'Madalena Smith Dynamic Green' | '302 Heritage Circle, Burnsville, MN'  (name_core='madalena smith dynamic green', addr_words='heritage burnsville', numbers='302', state='mn')
+    S2-251850089: 'Madalena Smith Dynamic' | ''  (name_core='madalena smith dynamic', addr_words='', numbers='', state='')
+  [no shared name_core token]
+    S1-652315195: 'Global Services Private Limited' | '206-207, Shangrila Arcade, Opp. Shyamal Row Houses, Shyamal Cross Road, Satellite, Ahmedabad, Gujarat'  (name_core='global services private', addr_words='shangrila arcade opp shyamal row houses cross satellite ahmedabad', numbers='206,207', state='gj')
+    S2-622103286: 'ગ્લોબલ સર્વિસીસ પ્રાઇવેટ લિમિટેડ' | 'A-206-207, AHMEDABAD, Gujarat'  (name_core='globl srvisiis praaivett limittedd', addr_words='a ahmedabad', numbers='206,207', state='gj')
+  [no shared name_core token]
+    S1-150200129: 'Lakshmi Bright Agro Private Limited' | 'A - 9, Vikramaditya Society, Thakkar Bapa Nagar, N. H. No. 8, Ahmedabad, Gujarat'  (name_core='agro private', addr_words='a vikramaditya society thakkar bapa nagar n h ahmedabad', numbers='8,9', state='gj')
+    S2-979746338: 'લક્ષ્મી બ્રાઇટ એગ્રો પ્રાઇવેટ લિમિટેડ' | 'A - 9, AHMEDABAD, Gujarat'  (name_core='lkssmii braaitt egro praaivett limittedd', addr_words='a ahmedabad', numbers='9', state='gj')
+  [no shared number]
+    S1-447738657: 'Unique Travel Corporation' | 'Firozpur, Bareka, Fazilka, Nihal Khera, Punjab, C/O Naresh Kumar, Fazilka'  (name_core='unique travel', addr_words='firozpur bareka fazilka nihal khera c o naresh kumar', numbers='', state='pb')
+    S3-770335928: 'Center Unique Corporation' | 'C/o Naresh Kumar, Bareka, Fazilka, Nihal Khera, Fazilka, Firozpur, PB'  (name_core='center unique', addr_words='c o naresh kumar bareka fazilka nihal khera firozpur', numbers='', state='pb')
+  [no shared number]
+    S1-303136764: 'Arts Society' | '2707 Toledo Avenue, Alton, IL'  (name_core='arts society', addr_words='toledo alton', numbers='2707', state='il')
+    S3-596388765: 'Arts Sóciety Sóciety' | '707 Toledo Avenue, <NULL>, Alton, Illinois'  (name_core='arts society', addr_words='toledo null alton', numbers='707', state='il')
+  [no shared name_core token]
+    S1-878628285: 'SR Solutions Private Limited' | 'Plot No. C-26C, Jeewan Park Pankha Road, Uttam Nagar, New Delhi, Delhi'  (name_core='sr solutions private', addr_words='c 26c jeewan park pankha uttam nagar', numbers='26', state='dl')
+    S3-930743281: 'Solbrix' | 'Pot No. C-26c, Uttam Nagar, New Delhi, DL'  (name_core='solbrix', addr_words='pot c 26c uttam nagar', numbers='26', state='dl')
+  [no shared number]
+    S1-902129787: 'Heartland Law Group, LLC' | '2304 Colonial Drive, Baytown, TX'  (name_core='heartland law group', addr_words='colonial baytown', numbers='2304', state='tx')
+    S3-804916966: 'Heartland Group, LLC Center' | 'Colonial Drive, Baytown, Texas'  (name_core='heartland group center', addr_words='colonial baytown', numbers='', state='tx')
+  [no shared number]
+    S1-61237513: 'VSS Vegetable Pvt. Ltd.' | 'Sharda Shopping Centre, Second Floor, Near Hare Krishna, Pritamnagar, Paldi, Ahmedabad, Gujarat'  (name_core='vss vegetable pvt', addr_words='sharda shopping centre second floor near hare krishna pritamnagar paldi ahmedabad', numbers='', state='gj')
+    S3-847106234: 'VSS Pvt. Ltd. Services' | 'Sharda Shopping Centre, Ahmedabad, ગુજરાત'  (name_core='vss pvt services', addr_words='sharda shopping centre ahmedabad gujraat', numbers='', state='')
+  [shared tokens/numbers exist but all keys still missed (rare-word/cap edge case)]
+    S1-879248909: 'Main Street Grill' | '2 Jackson Street, Unit 2, Haverhill, MA'  (name_core='main street grill', addr_words='jackson unit haverhill', numbers='2', state='ma')
+    S3-722795160: 'Main-Street' | '# 2, 2 Jackaon St, Massachusetts, Haverhill'  (name_core='main street', addr_words='jackaon haverhill', numbers='2', state='ma')
+  [no shared number]
+    S1-862968649: 'Shakti Hospitality Private Limited' | 'H/O- Annapurna Das Lingapada, Soro, Balasore, Orissa'  (name_core='shakti hospitality private', addr_words='h o annapurna das lingapada soro balasore', numbers='', state='od')
+    S3-854822196: 'Shakti Private Limited Services' | 'H/o- Annapurna Das Lingapada, Balasore, OD'  (name_core='shakti private services', addr_words='h o annapurna das lingapada balasore', numbers='', state='od')
 
-**Known mining artifacts excluded from all downstream use** (multi-word
-diffs or typos that coincidentally look like substitutions, not real
-synonyms): `private→center`, `inc→nc`, `and→nd`, `street→saint`, `plot→h`.
 
-## Part B — Normalization
+=== Part F: full test candidate generation ===
+Test S1 entities: 1732544; with >=1 candidate: 1724223 (99.52%); with 0 candidates: 8321
 
-`normalize.py` computes `name_clean/name_main/name_alt/name_core/
-name_nospace/name_sorted_chars/legal_form` and `addr_clean/numbers/state/
-addr_words` per record (see the module docstring for the exact pipeline).
-Ran on all 24.3M records across both splits in ~14 minutes using
-`multiprocessing.Pool(4)` over 100k-row chunks streamed from DuckDB. Full
-before/after examples for every (split, country) combination are in
-`output/step1_output.txt`'s sibling run log (see repo history) — representative
-examples:
+Candidates per S1 by country:
+  US: n_S1=663106, mean=30.4, median=28, max=60, zero-candidate S1s=3960 (0.60%)
+  France: n_S1=259452, mean=28.4, median=25, max=60, zero-candidate S1s=2016 (0.78%)
+  India: n_S1=809986, mean=38.5, median=40, max=60, zero-candidate S1s=2345 (0.29%)
 
-- `Ultra Fashion (Ltd.)` → name_clean `ultra fashion ltd`, legal_form `ltd`
-- `Xyloyuma Sys dba Costner Bsp Inc` → name_main `costner bsp inc`,
-  name_alt `xyloyuma sys` (wrapper correctly split)
-- `साईं प्रोडक्ट्स प्राइवेट लिमिटेड` → `saiin prodkts praaivett limaaittedd`
-  style fallback for uncovered Devanagari tokens (unidecode, not a real
-  translation)
-- `258 Ridgewater Way, Mt Juliet, TN` → `state='mt'` (Montana) — a real,
-  documented limitation: "Mt" here means "Mount" (part of the city name),
-  not the state, but it's a valid state code and gets matched first. Low
-  practical impact since the same mis-tag applies consistently to every
-  record mentioning "Mt Juliet", so it doesn't break matching between two
-  records that both have it — see "what I'd try next".
+(France has no training labels; a much higher zero-candidate or low-candidate rate for France above than US/India would mean the mined dictionaries/keys, which are all trained on US/India pairs, generalize poorly to French names/addresses.)
 
-**A real bug was found and fixed during this run**: the first `normalize.py`
-pass used a single global US+India merged state-code map, so a bare code
-like `de` (Delaware) also fired on **French** addresses using "de" as the
-ordinary preposition ("of/from" — e.g. "Rue de Cassel"), mistagging most
-French addresses as `state='de'`. Fixed by scoping state-code recognition to
-the record's own country (US records use only the US map, India only the
-India map, everything else — the open-set case, currently just France —
-uses a small hand-seeded region-name list: `nouvelle aquitaine`, `hauts de
-france`, `pays de la loire`, from the 8 France samples seen in Step 1).
-`normalize.py` was re-run in full after this fix; all `data/norm/*.parquet`
-reflect the corrected version.
-
-**A second, smaller limitation found but left as-is** (documented, not
-fixed, given time budget): multi-word region phrases like "Pays de la
-Loire" can lose their shared preposition ("de"/"la") to the name/address
-cleaning pipeline's token-deduplication step when that word already
-appeared earlier in the same address (e.g. "Rue de la Pierre..." earlier in
-the string) — deduping removes the second occurrence needed to match the
-phrase intact. "Hauts-de-France" and "Nouvelle-Aquitaine" are less exposed
-to this (fewer/no shared common words) and matched correctly in most
-samples seen.
-
-## Part C — IDF
-
-Per-(split, country) document frequency + IDF for `name_core` and
-`addr_words` tokens, computed via DuckDB over the S1+S2+S3 union of each
-split (`data/dicts/idf_name_{split}.parquet`, `idf_addr_{split}.parquet`).
-~25-125s per table.
-
-## Part D — Blocking keys
-
-Every key includes country (open-set string equality). Four families, exactly
-as specified:
-- **K1** address: (country, number, rare addr word) — up to 3 numbers
-  (longest-first) × 2 rarest `addr_words`.
-- **K2** name+place: (country, state, rare name_core token) when state is
-  known; **K2_nostate** (country, rare token) fallback with a stricter cap
-  when it isn't.
-- **K3** name_nospace: exact match, and first-8-characters prefix match.
-- **K4**: K2/K3 recomputed on `name_alt` (the wrapper-prefix side), only
-  when a wrapper was detected.
-
-**Cap tuning (the "tune the cap" step the spec anticipated actually
-mattered)**: started at cap=300 (default) / 100 (K2_nostate) per the initial
-plan. On the 300k-sample vs. full-train-pool test this produced **56.3M raw
-candidate rows / 49.0M distinct (S1, match) pairs** — far more than this
-machine could hold for the downstream aggregation (see Engineering Notes).
-Lowered to **cap=50 / 15**, which is what all recall numbers below reflect.
-This is a real precision/recall/resource trade-off: a tighter cap drops
-some legitimately-common-key true matches, but was necessary to complete
-the run at all on this hardware. With more RAM/disk, a higher cap (and
-likely +1-3 points of recall per the K1/K2/K3 numbers below) would be worth
-re-testing.
-
-**Cheap score**: `n_keys_hit` (count of distinct key types that matched)
-plus the sum of IDF over every *shared* `name_core` and `addr_words` token
-between the two records (not just the top-ranked ones used for key
-generation) — computed as a proper set-based join against per-record token
-tables, never a per-pair correlated subquery (an earlier version using
-correlated subqueries did not scale past a few thousand pairs).
-
-## Part E — Recall on the 300k train sample vs. full train pools
-
-(`data/train_sample_s1.parquet`, built by Track 1's `folds.py`: 300,000 S1
-ids stratified by country, seed 42.)
-
-- Sample: 300,000 S1 entities, 1,037,463 true (S1, match) pairs across
-  283,216 non-singleton entities.
-
-**Recall per key type (before top-K cut, i.e. the raw union of everything
-each key alone finds):**
-
-| Key | Hit | Recall |
-|---|---|---|
-| K1 (address number+word) | 777,696 | 74.96% |
-| K2 (name+state) | 392,493 | 37.83% |
-| K2_nostate | 28 | 0.00% |
-| K3_exact (name_nospace) | 481,703 | 46.43% |
-| K3_pfx8 (name prefix-8) | 376,882 | 36.33% |
-| K4_exact (alt name_nospace) | 9,962 | 0.96% |
-| K4_state (alt name+state) | 18,050 | 1.74% |
-| **UNION (any key)** | **941,457** | **90.75%** |
-
-K1 (address-based) is by far the strongest single key — consistent with
-Step 1's EDA finding that addresses are the stable half of this dataset
-while names are the heavily-corrupted half. K2_nostate and K4 contribute
-almost nothing at this cap; they exist mainly as a safety net for records
-with no wrapper/no detected state.
-
-**By country (union, before cut)**: India 362,731/414,999 (**87.41%**), US
-578,726/622,464 (**92.97%**) — a real, meaningful gap, consistent with the
-Devanagari-coverage ceiling from Part A and the wider script diversity in
-Indian names (see below).
-
-**By match source (union, before cut)**: S3 90.91%, S2 90.57% — near
-parity, no meaningful source-specific blocking weakness.
-
-**Recall vs. K (after the top-K cut)**:
-
-| K | Recall |
-|---|---|
-| 10 | 87.61% |
-| 20 | 89.43% |
-| 30 | 90.06% |
-| 40 | 90.38% |
-| 60 | 90.65% |
-
-**Target not reached**: the 97% union-recall target from the task spec was
-**not achieved** — even the union of all four key families before any cut
-tops out at 90.75%, and the recall-vs-K curve is nearly flat past K=20
-(diminishing returns from the cut itself are small; the ceiling is set by
-the union-before-cut number, i.e. by what the keys can find at all, not by
-how many we keep). Largest swept K=60 achieves 90.65%. See "what I'd try
-next" below — this needed a real second iteration round (more
-normalization work, primarily on non-Devanagari Indian scripts) that there
-wasn't time to complete in this session; it is reported honestly rather
-than silently claimed as met.
-
-**At K=60**: 217,182/283,216 (76.68%) of non-singleton S1 entities have
-**every** true match found; 278,329/283,216 (**98.27%**) have **at least
-one** found. The gap between these two numbers (76.7% vs 98.3%) says most
-recall loss comes from entities with *several* true matches where only
-some are found, not from entities that are missed entirely — good news for
-a downstream classifier (partial recall on multi-match entities is
-recoverable-ish; total misses are not).
-
-**Candidates per S1 at K=60**: mean 30.3, median 28, p95 60 (i.e. a
-meaningful fraction hit the cap), max 60, total 9,046,119 candidate pairs
-for the 300k sample.
-
-**30 random missed pairs, grouped by cause** (full list with raw + normalized
-fields in the git history of this file / the run log): the dominant causes,
-by inspection, are:
-1. **Non-Devanagari Indian scripts** (~9 of 30): Telugu (`యూనివర్సల్...`),
-   Malayalam (`സൂപ്പർ...`), Kannada (`ಸಾಯಿ...`, `ಶಿವ್...`, `ಡಿಜಿಟಲ್...`),
-   Bengali (`সাউথ...`), Gujarati (`ઈસ્ટર્ન...`) — none of these are in the
-   U+0900–U+097F Devanagari range the task scoped Part A to, so they get the
-   generic `unidecode` fallback, which produces near-unusable garbled tokens
-   (e.g. `yuunivrsl injniiring praiveett limittedd` for "Universal
-   Engineering Private Limited") that share almost nothing with the Latin
-   S1 side. This is the single largest identifiable recall gap and fully
-   explains the India-vs-US recall difference.
-2. **No shared number** (~11 of 30): genuine data corruption/truncation on
-   one side (e.g. `2064` vs `64`, `5821` vs missing entirely, `742` vs
-   `1742`) — not a normalization bug, a real limit of number-based blocking
-   when the number itself is corrupted or dropped.
-3. **Cap edge cases** (~4 of 30): both sides do share tokens/numbers, but
-   the specific rare-word combination didn't survive the tightened cap —
-   directly attributable to the cap=50 tuning trade-off above.
-4. **Character-level typos breaking name tokens** (~3 of 30): e.g.
-   `Ferrola`/`Ferro1a`, `Committee`/`Commitbee`, `Patfges`/`Pantages` —
-   single-character substitutions that change the token entirely, invisible
-   to exact/prefix-based name keys.
-
-## Part F — Full test candidates
-
-(`data/cand/test_candidates.parquet`, `output/candidate_pairs.tsv`.)
-
-- 1,732,544 test S1 entities; 1,722,995 (**99.45%**) got ≥1 candidate,
-  9,549 got zero.
-
-| Country | S1 count | Mean candidates | Median | Zero-candidate rate |
-|---|---|---|---|---|
-| US | 663,106 | 26.7 | 23 | 0.64% |
-| France | 259,452 | 26.1 | 22 | 0.83% |
-| India | 809,986 | 36.5 | 38 | 0.39% |
-
-**France does not look dramatically different from US/India** — mean
-candidate count (26.1) is close to the US's (26.7), and its zero-candidate
-rate (0.83%) is only slightly higher than the US's (0.64%), well within the
-same order of magnitude as India's (0.39%). This is a genuinely encouraging
-sign: even with zero French training data and only a 3-region hand-seeded
-list, country-scoped blocking on addresses/numbers (which don't depend on
-having a translation dictionary) generalizes reasonably to France. India's
-higher mean (36.5) likely reflects longer, more multi-component free-text
-Indian addresses producing more K1 number+word combinations per record, not
-a blocking-quality difference.
-
-`output/candidate_pairs.tsv` was written (one row per test S1, comma-joined
-`S2-/S3-` ids, empty when none) and validated structurally by construction
-(same `write_id_list_tsv` helper as Step 1's submission writer, which passed
-`utils/validate_submission.py` in Step 1).
-
-## Timings & memory (this 16GB machine)
-
-| Stage | Wall time | Peak RSS |
-|---|---|---|
-| mine_dicts.py (Part A) | ~7 min | <0.25 GB |
-| normalize.py (Part B, both fixes' final run) | ~14 min | <0.5 GB/worker |
-| compute_idf + build_token_tables (Part C, both splits) | ~3 min | <1 GB |
-| Part E (300k sample vs. full train pools) | ~18 min | 1.4 GB |
-| Part F (all 1.73M test S1 vs. full test pools) | ~45 min | 3.4 GB |
-
-## Engineering notes: getting Part D-F to run at all on this hardware
-
-This took far longer than the compute numbers above suggest, because of
-real, repeated resource exhaustion on this specific machine (16GB RAM
-laptop, C: drive at 90%+ full with as little as ~14GB free) — worth
-recording since `docs/AWS_SETUP.md` exists specifically so this doesn't
-recur on a properly-sized box:
-
-1. Building keys for the full ~10M-row S2/S3 pool in one pass caused a real
-   `OutOfMemoryException`, then once, under combined system memory
-   pressure, a native segfault.
-2. Switched DuckDB from pure `:memory:` to an on-disk database file so its
-   buffer manager could spill instead of crashing — fixed the segfault, but
-   the underlying OOM recurred.
-3. Restructured `build_keys_table`'s four token-family CTEs (name, alt,
-   addr, numbers) into separate sequential materialized tables instead of
-   one multi-CTE query — DuckDB was holding all four window-function
-   pipelines' state at once.
-4. Diagnosed that the raw candidate join before scoring was **56.3M rows /
-   49.0M distinct pairs** at the original cap=300 — the real root cause, not
-   just a memory-tuning problem. Lowered the cap to 50/15 (see Part D).
-5. Filtered the S2/S3-side token tables down to just the ids present in the
-   current candidate batch before the shared-IDF join, instead of joining
-   against the full multi-million-row token tables every time.
-6. Ran out of disk (`IOException`: temp spill couldn't write) on the C:
-   drive (~14GB free at the time) — moved DuckDB's scratch database and
-   spill directory to D: (~130GB free) at the user's suggestion.
-7. Even per-country, test's largest countries (US 663k, India 810k S1
-   records — 4-5x bigger than any per-country slice in the 300k train
-   sample) still exhausted a 116GB temp-directory limit on D: during
-   scoring. Added a second chunking level: each country's S1 side is now
-   also split into fixed 150,000-row batches, reusing that country's
-   already-built S2/S3 keys across batches.
-
-None of this changes correctness (country-scoped chunking and S1 batching
-are both pure partitions of independent work), only where a genuinely
-20M+-row-scale join gets computed. It's the direct, lived version of the
-project rule "if RAM ≤16GB, process per country and in chunks" — one level
-of chunking (by country) turned out not to be enough at this data volume,
-and a second level (fixed-size batches within a country) was needed too.
-
-## What I'd try next
-
-1. **Extend Devanagari-style mining to other Indian scripts.** This is the
-   highest-leverage fix identified: Telugu (U+0C00–U+0C7F), Kannada
-   (U+0C80–U+0CFF), Malayalam (U+0D00–U+0D7F), Bengali (U+0980–U+09FF), and
-   Gujarati (U+0A80–U+0AFF) all appear in the missed-pair sample and none
-   are covered by the current pipeline, which the task spec scoped to
-   Devanagari only. Mining an equivalent per-script token map (same
-   equal-length-pairs-plus-alignment method) would directly target the
-   87.4%-vs-92.97% India/US recall gap.
-2. **Re-test with a higher blocking cap on a bigger machine.** The cap=50/15
-   tuning was a resource-forced trade-off, not a precision/recall-driven
-   one; the K1/K2/K3 per-key recall numbers suggest real headroom was left
-   on the table (the original cap=300 run had reached the join stage
-   successfully and only failed during aggregation).
-3. **Fix the pre-dedup phrase-matching order** for France's multi-word
-   region names (Part B's second documented limitation) — extract
-   multi-word state/region phrases before token deduplication, not after.
-4. **Number-similarity fallback key**, e.g. edit-distance-1 on the numeric
-   token, to catch the "no shared number" corruption cases (2064 vs 64,
-   etc.) found in the missed-pairs sample — currently numbers must match
-   exactly to contribute to K1.
-5. **A char-n-gram or phonetic key** (e.g. Soundex/double-metaphone on
-   name_core, or trigram overlap) to catch single-character-substitution
-   typos (Ferrola/Ferro1a, Committee/Commitbee) that break exact/prefix
-   name keys entirely.
+Wrote C:\Users\archi\OneDrive\Desktop\sem 7\Amazon ML challenge\run1\student_resource\output\candidate_pairs.tsv (1732544 rows).
