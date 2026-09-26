@@ -7,8 +7,13 @@ legal forms, honorifics) that are cross-checked against real matched pairs
 before being trusted. No test labels exist and none are used here.
 
 Outputs (all under ``data/dicts/``):
-    devanagari_name_map.json   token -> {map, support, agreement, total_seen}
-    devanagari_addr_map.json   same, for address tokens
+    native_name_map.json       native-script (any Indic script) token ->
+                                {map, support, agreement, total_seen}
+    native_addr_map.json       same, for address tokens
+    state_alias_india.json     native-script address n-gram -> {state, support,
+                                agreement}: state/city names whose
+                                transliteration never matches the Latin state
+                                name (e.g. "তামিলনাড়ু", "पश्चिम बंगाल")
     address_abbrev_map.json    verified {full: short} address-word abbreviations
     state_map_us.json          verified {full: code} US state names
     state_map_india.json       verified {full: code} India state names
@@ -28,13 +33,16 @@ folded into ``output/BLOCKING_REPORT.md``.
 import json
 import re
 import sys
+import unicodedata
 from collections import Counter, defaultdict
 
+from rapidfuzz import fuzz
 from unidecode import unidecode
 
+import normalize
 from config import RAW_DIR, DICTS_DIR, raw_parquet_path
 from db import connect
-from normalize import WORD_RE
+from normalize import INDIC_RE, WORD_RE, skeleton_token
 from perf import print_sysinfo, stage
 
 sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
@@ -43,10 +51,15 @@ JOINED_PAIRS_PARQUET = RAW_DIR / "train_gt_joined.parquet"
 BATCH_ROWS = 200_000
 MIN_SUPPORT = 5
 MIN_AGREEMENT = 0.7
-
-DEVANAGARI_RE = re.compile(r"[ऀ-ॿ]")
-# WORD_RE comes from normalize.py -- see there for why plain \w breaks on
-# Indic combining marks (it shreds native-script words like "शक्ति").
+# Unequal-length native/Latin pairs: a native token is aligned to the Latin
+# token whose consonant skeleton best matches its transliteration's skeleton,
+# only when that match is good and clearly better than the runner-up.
+ALIGN_MIN_SCORE = 75
+ALIGN_MIN_MARGIN = 10
+MIN_ALIAS_SUPPORT = 10
+MIN_ALIAS_AGREEMENT = 0.9
+INDIC_SQL_RE = r"[\x{0900}-\x{0D7F}]"
+ASCII_ALNUM_RE = re.compile(r"[^a-z0-9]")
 
 ADDR_ABBR_CANDIDATES = {
     "road": "rd", "street": "st", "drive": "dr", "avenue": "ave", "lane": "ln",
@@ -112,13 +125,48 @@ NOISE_ARTIFACTS = {("private", "center"), ("inc", "nc"), ("and", "nd"),
 
 
 def tokenize(text):
-    """Lowercase-agnostic Unicode word tokenizer (keeps Devanagari as \\w)."""
+    """Unicode word tokenizer that keeps Indic combining marks attached (see normalize.WORD_RE)."""
     return WORD_RE.findall(text)
 
 
-def has_devanagari(text):
-    """Return True if ``text`` contains any Devanagari (U+0900-U+097F) char."""
-    return bool(DEVANAGARI_RE.search(text))
+def has_indic(text):
+    """Return True if ``text`` contains any Indic-script character."""
+    return bool(INDIC_RE.search(text))
+
+
+def _translit_skeleton(tok):
+    """Consonant skeleton of a token's ASCII transliteration."""
+    return skeleton_token(ASCII_ALNUM_RE.sub("", unidecode(tok).lower()))
+
+
+def align_native_latin(native_toks, latin_toks):
+    """Return (native_token, latin_token) alignments for one matched native/Latin text pair.
+
+    Equal token counts: positional (the common case -- the same name written
+    in two scripts). Otherwise each native token is matched to the Latin token
+    whose skeleton best matches its transliteration's skeleton, if that match
+    scores >= ALIGN_MIN_SCORE and beats the runner-up by ALIGN_MIN_MARGIN --
+    this recovers the many pairs where one side carries an extra word (a legal
+    form, a locality) that the old equal-length-only rule threw away.
+    """
+    if len(native_toks) == len(latin_toks):
+        return [(nt, lt) for nt, lt in zip(native_toks, latin_toks) if INDIC_RE.search(nt)]
+    lat_skel = [skeleton_token(ASCII_ALNUM_RE.sub("", lt)) for lt in latin_toks]
+    out = []
+    for nt in native_toks:
+        if not INDIC_RE.search(nt):
+            continue
+        ns = _translit_skeleton(nt)
+        if not ns:
+            continue
+        scores = sorted(((fuzz.ratio(ns, ls), i) for i, ls in enumerate(lat_skel) if ls), reverse=True)
+        if not scores:
+            continue
+        best, best_i = scores[0]
+        runner_up = scores[1][0] if len(scores) > 1 else 0
+        if best >= ALIGN_MIN_SCORE and best - runner_up >= ALIGN_MIN_MARGIN:
+            out.append((nt, latin_toks[best_i]))
+    return out
 
 
 def build_joined_pairs(con):
@@ -160,16 +208,16 @@ def iter_batches(con, columns):
 
 
 # ---------------------------------------------------------------------------
-# Task 1: Devanagari -> Latin token map
+# Task 1: native-script (all Indic scripts) -> Latin token map
 # ---------------------------------------------------------------------------
 
-def mine_devanagari_map(con, a_col, b_col):
-    """Mine a Devanagari->Latin token map from one text field of matched pairs.
+def mine_native_map(con, a_col, b_col):
+    """Mine a native-script->Latin token map from one text field of matched pairs.
 
-    For each pair where exactly one side contains Devanagari text and both
-    sides tokenize to the same length, aligns tokens positionally and tallies
-    (devanagari_token -> latin_token) co-occurrence. Keeps a mapping only when
-    its best candidate has support >= MIN_SUPPORT and agreement >= MIN_AGREEMENT.
+    For each pair where exactly one side contains Indic-script text, aligns
+    tokens (``align_native_latin``) and tallies (native_token -> latin_token)
+    co-occurrence. Keeps a mapping only when its best candidate has support
+    >= MIN_SUPPORT and agreement >= MIN_AGREEMENT.
     """
     pair_counts = defaultdict(Counter)
     n_pairs_considered = 0
@@ -177,18 +225,17 @@ def mine_devanagari_map(con, a_col, b_col):
         for a_text, b_text in zip(df[a_col], df[b_col]):
             if not a_text or not b_text:
                 continue
-            a_dev, b_dev = has_devanagari(a_text), has_devanagari(b_text)
-            if a_dev == b_dev:
+            a_nat, b_nat = has_indic(a_text), has_indic(b_text)
+            if a_nat == b_nat:
                 continue
-            dev_text, lat_text = (a_text, b_text) if a_dev else (b_text, a_text)
-            dev_tokens = tokenize(dev_text)
+            nat_text, lat_text = (a_text, b_text) if a_nat else (b_text, a_text)
+            nat_tokens = tokenize(unicodedata.normalize("NFKC", nat_text))
             lat_tokens = [t.lower() for t in tokenize(lat_text)]
-            if not dev_tokens or len(dev_tokens) != len(lat_tokens):
+            if not nat_tokens or not lat_tokens:
                 continue
             n_pairs_considered += 1
-            for dt, lt in zip(dev_tokens, lat_tokens):
-                if DEVANAGARI_RE.search(dt):
-                    pair_counts[dt][lt] += 1
+            for nt, lt in align_native_latin(nat_tokens, lat_tokens):
+                pair_counts[nt][lt] += 1
 
     mapping = {}
     for dt, sub in pair_counts.items():
@@ -201,32 +248,75 @@ def mine_devanagari_map(con, a_col, b_col):
     return mapping, n_pairs_considered, len(pair_counts)
 
 
-def devanagari_token_universe(con, split):
-    """Return a Counter of Devanagari token frequencies across one split.
+def native_token_universe(con, split):
+    """Return a Counter of native-script token frequencies across one split.
 
     Scans business_name and business_address of S1/S2/S3 for ``split``,
-    filtering to rows that contain Devanagari text (cheap DuckDB regex scan)
-    before tokenizing in Python, so the full non-Devanagari majority of the
-    dataset is never materialized.
+    filtering to rows that contain Indic-script text (cheap DuckDB regex scan)
+    before tokenizing in Python, so the Latin-only majority of the dataset is
+    never materialized.
     """
     counter = Counter()
-    devanagari_re2 = r"[\x{0900}-\x{097F}]"
     for source in ("S1", "S2", "S3"):
         path = raw_parquet_path(split, source).as_posix()
-        rows = con.execute(
+        result = con.execute(
             f"""
             SELECT business_name, business_address FROM '{path}'
             WHERE regexp_matches(business_name, ?)
                OR regexp_matches(business_address, ?)
             """,
-            [devanagari_re2, devanagari_re2],
-        ).fetchall()
-        for name, addr in rows:
-            for text in (name, addr):
-                for tok in tokenize(text):
-                    if DEVANAGARI_RE.search(tok):
-                        counter[tok] += 1
+            [INDIC_SQL_RE, INDIC_SQL_RE],
+        )
+        for batch in result.to_arrow_reader(BATCH_ROWS):
+            for name, addr in batch.to_pandas().itertuples(index=False):
+                for text in (name, addr):
+                    counter.update(normalize.native_tokens(text or ""))
     return counter
+
+
+# ---------------------------------------------------------------------------
+# Task 1b: native-script state/city aliases (India)
+# ---------------------------------------------------------------------------
+
+def mine_state_aliases(con):
+    """Mine native-script address n-grams that reliably imply an India state.
+
+    For India matched pairs where exactly one address is in a native script
+    and the Latin address yields a state (through the same verified state map
+    and priority rules ``normalize`` uses), tally every native bigram/unigram
+    of the native address against that state. An n-gram is kept when seen
+    >= MIN_ALIAS_SUPPORT times with >= MIN_ALIAS_AGREEMENT on one state: that
+    captures native state names whose transliteration never matches the
+    Latin name (Bengali/Tamil/Telugu forms of "West Bengal", "Tamil Nadu",
+    "Andhra Pradesh") and city names that pin down one state, while generic
+    address words (seen with many states) fall below the agreement bar.
+    Requires the state/abbreviation maps to be written to DICTS_DIR first.
+    """
+    normalize._init_worker(str(DICTS_DIR))
+    counts = defaultdict(Counter)
+    n_pairs = 0
+    for df in iter_batches(con, ["s1_addr", "match_addr", "s1_country"]):
+        for a_text, b_text, country in zip(df["s1_addr"], df["match_addr"], df["s1_country"]):
+            if country != "India" or not a_text or not b_text:
+                continue
+            a_nat, b_nat = has_indic(a_text), has_indic(b_text)
+            if a_nat == b_nat:
+                continue
+            nat_text, lat_text = (a_text, b_text) if a_nat else (b_text, a_text)
+            _, state = normalize._apply_state_and_abbrev(normalize._base_clean(lat_text, {}), "India")
+            if not state:
+                continue
+            n_pairs += 1
+            for gram in set(normalize.native_ngrams(nat_text)):
+                counts[gram][state] += 1
+
+    aliases = {}
+    for gram, sub in counts.items():
+        total = sum(sub.values())
+        state, n = sub.most_common(1)[0]
+        if n >= MIN_ALIAS_SUPPORT and n / total >= MIN_ALIAS_AGREEMENT:
+            aliases[gram] = {"state": state, "support": n, "agreement": round(n / total, 3)}
+    return aliases, n_pairs
 
 
 # ---------------------------------------------------------------------------
@@ -347,7 +437,7 @@ def mine_boundary_tokens(con, last_candidates, first_candidates):
 
 def main():
     """Run all Part A mining tasks and write dictionaries + a summary report."""
-    low_ram = print_sysinfo()
+    print_sysinfo()
     DICTS_DIR.mkdir(parents=True, exist_ok=True)
     con = connect()
 
@@ -359,31 +449,31 @@ def main():
     summary_lines = []
     summary_lines.append(f"Joined train matched pairs: {n_joined}")
 
-    # --- Task 1: Devanagari maps ---
-    with stage("mine Devanagari->Latin name map"):
-        name_map, name_pairs_considered, name_distinct = mine_devanagari_map(con, "s1_name", "match_name")
-    with stage("mine Devanagari->Latin address map"):
-        addr_map, addr_pairs_considered, addr_distinct = mine_devanagari_map(con, "s1_addr", "match_addr")
-    (DICTS_DIR / "devanagari_name_map.json").write_text(json.dumps(name_map, ensure_ascii=False, indent=2), encoding="utf-8")
-    (DICTS_DIR / "devanagari_addr_map.json").write_text(json.dumps(addr_map, ensure_ascii=False, indent=2), encoding="utf-8")
-    summary_lines.append(f"\n=== Task 1: Devanagari->Latin maps ===")
-    summary_lines.append(f"NAME: {name_pairs_considered} equal-length dev/lat pairs considered, "
-                          f"{name_distinct} distinct dev tokens seen, {len(name_map)} kept "
+    # --- Task 1: native-script maps (every Indic script) ---
+    with stage("mine native->Latin name map"):
+        name_map, name_pairs_considered, name_distinct = mine_native_map(con, "s1_name", "match_name")
+    with stage("mine native->Latin address map"):
+        addr_map, addr_pairs_considered, addr_distinct = mine_native_map(con, "s1_addr", "match_addr")
+    (DICTS_DIR / "native_name_map.json").write_text(json.dumps(name_map, ensure_ascii=False, indent=2), encoding="utf-8")
+    (DICTS_DIR / "native_addr_map.json").write_text(json.dumps(addr_map, ensure_ascii=False, indent=2), encoding="utf-8")
+    summary_lines.append(f"\n=== Task 1: native-script (all Indic scripts) -> Latin maps ===")
+    summary_lines.append(f"NAME: {name_pairs_considered} native/Latin pairs considered, "
+                          f"{name_distinct} distinct native tokens aligned, {len(name_map)} kept "
                           f"(support>={MIN_SUPPORT}, agreement>={MIN_AGREEMENT}).")
-    summary_lines.append(f"ADDRESS: {addr_pairs_considered} equal-length dev/lat pairs considered, "
-                          f"{addr_distinct} distinct dev tokens seen, {len(addr_map)} kept.")
+    summary_lines.append(f"ADDRESS: {addr_pairs_considered} native/Latin pairs considered, "
+                          f"{addr_distinct} distinct native tokens aligned, {len(addr_map)} kept.")
 
-    with stage("Devanagari coverage in train/test"):
+    with stage("native-script coverage in train/test"):
         combined_map_keys = set(name_map) | set(addr_map)
         for split in ("train", "test"):
-            universe = devanagari_token_universe(con, split)
+            universe = native_token_universe(con, split)
             covered = sum(n for tok, n in universe.items() if tok in combined_map_keys)
             total = sum(universe.values())
             distinct_covered = sum(1 for tok in universe if tok in combined_map_keys)
             pct = 100.0 * covered / total if total else 0.0
             distinct_pct = 100.0 * distinct_covered / len(universe) if universe else 0.0
             summary_lines.append(
-                f"{split} Devanagari coverage: {covered}/{total} token occurrences "
+                f"{split} native-script coverage: {covered}/{total} token occurrences "
                 f"({pct:.1f}%), {distinct_covered}/{len(universe)} distinct tokens ({distinct_pct:.1f}%)."
             )
 
@@ -410,6 +500,18 @@ def main():
     dropped_us = [f for f in US_STATE_CANDIDATES if f not in us_states]
     if dropped_us:
         summary_lines.append(f"  US states dropped (no/low support in train): {dropped_us}")
+
+    # --- Task 1b: native-script state/city aliases (needs the state maps above) ---
+    with stage("mine native-script state aliases (India)"):
+        aliases, alias_pairs = mine_state_aliases(con)
+    (DICTS_DIR / "state_alias_india.json").write_text(
+        json.dumps(aliases, ensure_ascii=False, indent=2), encoding="utf-8")
+    summary_lines.append(f"\n=== Task 1b: native-script state aliases (India) ===")
+    summary_lines.append(f"{alias_pairs} native/Latin address pairs with a known Latin-side state; "
+                          f"{len(aliases)} n-grams kept (support>={MIN_ALIAS_SUPPORT}, "
+                          f"agreement>={MIN_ALIAS_AGREEMENT}).")
+    by_state = Counter(v["state"] for v in aliases.values())
+    summary_lines.append("Aliases per state: " + ", ".join(f"{s}:{n}" for s, n in by_state.most_common()))
 
     # --- Task 3: name wrappers ---
     with stage("mine name wrapper separators"):

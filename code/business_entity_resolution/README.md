@@ -1,181 +1,151 @@
 # Business Entity Resolution
 
-Full pipeline: environment setup, EDA, dictionary mining, normalization,
-blocking, pair features, and a trained LightGBM model producing a validated
-test submission.
+End-to-end pipeline: dictionary mining, normalization, blocking (candidate
+generation), pair features, a two-stage LightGBM model with a calibrated
+expected-F0.5 decision layer, and a validated test submission.
+
+The same code runs on Linux, macOS and Windows and sizes itself to the machine:
+RAM budget, worker processes, DuckDB memory/threads, blocking caps, batch sizes
+and training-set size all come from `src/resources.py` (see "Machine sizing").
 
 ## Setup
 
-Run all commands from the `student_resource/` root (this repo's root).
+The dataset (`dataset/train/*.tsv`, `dataset/test/*.tsv`) must be in the repo
+root; it is gitignored, so copy it onto each new machine.
+
+**Ubuntu / Linux**
 
 ```bash
-python -m venv .venv
-.venv/Scripts/python.exe -m pip install -r code/business_entity_resolution/requirements.txt
+bash setup_ubuntu.sh          # creates .venv, installs pinned deps, checks dataset + prints the machine profile
+tmux new -s ber               # optional: keeps the run alive if SSH drops
+.venv/bin/python code/business_entity_resolution/run_pipeline.py
 ```
 
-Dependencies are pinned in `requirements.txt` (pandas, numpy, scikit-learn,
-rapidfuzz, lightgbm, unidecode, pyarrow, duckdb, psutil).
+**Windows**
 
-**Scratch space**: `code/business_entity_resolution/src/db.py` points
-DuckDB's on-disk warehouse and spill files at `D:/ber_scratch` by default
-(falls back to `data/` under the repo if `D:` doesn't exist). Blocking and
-feature computation need real headroom here — tens of GB of temp spill are
-normal at this dataset's scale. If your `C:`/primary drive is tight on
-space, make sure whatever drive `SCRATCH_DIR` in `db.py` resolves to has at
-least ~50 GB free.
+```powershell
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install -r code\business_entity_resolution\requirements.txt
+.venv\Scripts\python.exe code\business_entity_resolution\run_pipeline.py
+```
+
+Python >= 3.10. Dependencies are pinned in `requirements.txt` (pandas, numpy,
+scikit-learn, rapidfuzz, lightgbm, unidecode, pyarrow, duckdb, psutil).
+
+## Running
+
+```bash
+python code/business_entity_resolution/run_pipeline.py              # all steps
+python code/business_entity_resolution/run_pipeline.py --list       # show steps
+python code/business_entity_resolution/run_pipeline.py --from features_train   # resume
+python code/business_entity_resolution/run_pipeline.py --only train_model
+```
+
+Steps, in order: `ingest` → `folds` → `evaluate` (metric unit tests) →
+`mine_dicts` → `normalize` → `blocking_train` → `blocking_test` →
+`features_train` → `features_test` → `train_model` → `oof_report`.
+`ingest`/`folds` are skipped when their outputs exist (`--force` reruns them).
+
+Progress: every step streams to the console and to `output/logs/<step>.log`
+(percent done, elapsed, ETA); `output/logs/pipeline_status.json` holds the
+current step and per-step timings; each step ends with a
+`[pipeline] STEP_DONE` / `STEP_FAILED` line. A failed step prints the exact
+`--from` command to resume.
+
+Outputs: `output/matching_results.tsv` + `output/candidate_pairs.tsv` (the
+submission, validated by `utils/validate_submission.py` at the end of
+`train_model`), `output/MODEL_REPORT.md` (OOF score, decision rule, LOCO,
+feature importance), `output/BLOCKING_REPORT_train_only.md` (blocking recall),
+a row in `output/results_log.csv`, and `output/worst20_oof_entities.txt`.
+
+## Machine sizing
+
+`src/resources.py` reads total/free RAM (respecting container cgroup limits),
+usable cores (respecting CPU affinity) and scratch-disk space at startup, and
+derives everything from a RAM budget of `min(80% of total, free - 1 GB)`, so a
+run stays out of OOM even with other applications open. Printed at the top of
+every step as `[resources] ...`.
+
+| Setting | 16 GB laptop, ~3 GB free | 64 GB+ server |
+|---|---|---|
+| DuckDB memory (blocking) | ~1.7 GB | ~36 GB |
+| feature / normalize worker processes | 2 / 7 | all cores |
+| blocking caps (normal / strict keys) | 50 / 15 | 150 / 40 |
+| candidates kept per S1 (top-K) | 40 | 50 |
+| training candidate rows | ~4M | all (~80M) |
+
+Bigger caps and top-K mean more recall; a bigger training set means a better
+model. Override anything with environment variables:
+
+| Variable | Meaning |
+|---|---|
+| `BER_SCRATCH_DIR` | DuckDB warehouse + spill dir (needs ~100 GB free; default `data/scratch`, or `D:/ber_scratch` on the Windows laptop) |
+| `BER_RAM_BUDGET_GB` | total RAM the pipeline may use |
+| `BER_CORES` | cores to use |
+| `BER_CAP_DEFAULT`, `BER_CAP_STRICT` | blocking block-size caps |
+| `BER_TOP_K` | candidates kept per S1 |
+| `BER_S1_BATCH` | S1 rows per blocking batch |
+| `BER_TRAIN_MAX_ROWS` | max training candidate rows |
+| `BER_WORKERS` | worker processes |
+
+Pin them when you need a run to be exactly reproducible across machines.
+LightGBM uses the GPU automatically if the installed build supports it (the
+PyPI wheel is CPU-only on Windows) and falls back to CPU otherwise.
 
 ## Layout
 
 ```
 code/business_entity_resolution/
+├── run_pipeline.py           # one command for the whole pipeline (any OS)
 ├── requirements.txt
-├── README.md
 └── src/
-    ├── config.py                 # all data paths, resolved relative to student_resource/
-    ├── db.py                     # shared DuckDB connection (memory cap, disk spill/scratch)
-    ├── perf.py                   # print_sysinfo() / stage() timing+memory logging
-    ├── io_utils.py                # read_tsv, split_ids, write_id_list_tsv, f05 metric
-    │
-    ├── first_look.py             # Step 1: EDA / data-quality checks (a-i)
-    ├── noise_mining.py           # Step 1: name/address abbreviation-substitution mining
-    ├── make_empty_submission.py  # Step 1: all-empty first submission
-    ├── sanity_check_metric.py    # Step 1: verifies f05 against known baselines
-    │
-    ├── ingest.py                 # Step 2: raw TSV -> typed parquet (data/raw/)
-    ├── mine_dicts.py             # Step 2 Track 2: dictionaries mined from train pairs (data/dicts/)
-    ├── normalize.py              # Step 2 Track 3a: name/address normalization (data/norm/)
-    ├── blocking.py               # Step 2 Track 3b-f: IDF, blocking keys, recall measurement, test candidates
-    ├── evaluate.py               # Step 2 Track 1: macro F0.5 / precision / recall scoring
-    ├── folds.py                  # Step 2 Track 1: 300k stratified sample + 5-fold assignment
-    ├── features.py               # Step 2 Track 4 Phase 1: pair feature functions + GT-vs-negatives sanity check
-    ├── features_candidates.py    # Step 2 Track 4 Phase 2: features on real blocking candidates
-    ├── train_model.py            # Step 2 Track 5: LightGBM, decision-rule tuning, LOCO, test submission
-    └── oof_report.py             # Step 2 Track 5: saves OOF probabilities, worst-20-entities report
+    ├── resources.py          # machine profile: RAM/cores/disk -> every size knob
+    ├── config.py             # all data paths, relative to the repo root
+    ├── db.py                 # DuckDB connection (profile-sized memory/threads, disk spill)
+    ├── perf.py               # stage timing, progress/ETA lines
+    ├── io_utils.py           # TSV/id-list helpers, f05 metric
+    ├── ingest.py             # raw TSV -> parquet
+    ├── folds.py              # 300k recall sample + 5-fold assignment over all train S1
+    ├── evaluate.py           # macro F0.5 scorer (+ vectorized version) and its unit tests
+    ├── mine_dicts.py         # dictionaries mined from train pairs (native-script maps,
+    │                         #   native state aliases, states, abbreviations, legal forms...)
+    ├── normalize.py          # name/address normalization
+    ├── blocking.py           # IDF, key families K1-K7, candidates for ALL train + test S1, recall
+    ├── features.py           # pair feature functions
+    ├── features_candidates.py# features for every candidate pair (+ competition features)
+    ├── train_model.py        # two-stage LightGBM, calibration, decision layer, submission
+    ├── oof_report.py         # worst-20 OOF entities
+    ├── make_package.py       # builds the submission zip
+    └── (Step 1 EDA / diagnostics: first_look, noise_mining, miss_diagnosis, translit_compare, ...)
 ```
 
-## Run order
+## Method summary
 
-```bash
-# --- Step 1: setup, EDA, all-empty baseline ---
-.venv/Scripts/python.exe code/business_entity_resolution/src/first_look.py > output/step1_output.txt
-.venv/Scripts/python.exe code/business_entity_resolution/src/noise_mining.py
-.venv/Scripts/python.exe code/business_entity_resolution/src/sanity_check_metric.py
-.venv/Scripts/python.exe code/business_entity_resolution/src/make_empty_submission.py
-
-# --- Step 2: full pipeline ---
-# 1. Ingest raw TSVs to typed parquet (one-time; ~10s)
-.venv/Scripts/python.exe code/business_entity_resolution/src/ingest.py
-
-# 2. Track 1: evaluation harness + train sample/folds (independent of everything else)
-.venv/Scripts/python.exe code/business_entity_resolution/src/folds.py
-.venv/Scripts/python.exe code/business_entity_resolution/src/evaluate.py
-
-# 3. Track 2: mine dictionaries from train ground truth (~7 min)
-.venv/Scripts/python.exe code/business_entity_resolution/src/mine_dicts.py
-
-# 4. Track 3a: normalize every record (~14 min)
-.venv/Scripts/python.exe code/business_entity_resolution/src/normalize.py
-
-# 5. Track 3b-f: IDF, blocking keys, recall measurement, test candidates (~65 min)
-#    Writes output/BLOCKING_REPORT.md, data/cand/test_candidates.parquet,
-#    output/candidate_pairs.tsv (blocking's own top-60 view; train_model.py
-#    below overwrites this with the model's actual inference-input set).
-.venv/Scripts/python.exe code/business_entity_resolution/src/blocking.py
-
-# 6. Track 4 Phase 1: feature functions, unit-tested on GT pairs vs. negatives (~15 min)
-.venv/Scripts/python.exe code/business_entity_resolution/src/features.py
-
-# 7. Track 4 Phase 2: features on the real candidate pairs (~16 min train, ~102 min test)
-.venv/Scripts/python.exe code/business_entity_resolution/src/features_candidates.py train
-.venv/Scripts/python.exe code/business_entity_resolution/src/features_candidates.py test
-
-# 8. Track 5: train, tune the decision rule, LOCO check, predict test, validate (~60 min)
-#    Writes output/matching_results.tsv, output/candidate_pairs.tsv (final),
-#    appends a row to output/results_log.csv.
-.venv/Scripts/python.exe code/business_entity_resolution/src/train_model.py
-
-# 9. Track 5 extra: save OOF probabilities + worst-20-entities error analysis (~11 min)
-.venv/Scripts/python.exe code/business_entity_resolution/src/oof_report.py
-
-# 10. Validate the final submission
-python utils/validate_submission.py \
-    --matching output/matching_results.tsv \
-    --candidate output/candidate_pairs.tsv \
-    --test-dir dataset/test
-```
-
-All large source TSVs/parquet are streamed in chunks (DuckDB batches or
-`multiprocessing.Pool` over fixed-size row batches, see `CHUNK`/`BATCH_ROWS`
-constants in each script), so no script needs to hold a full multi-GB file
-in memory at once. `blocking.py` and `train_model.py`'s test-prediction step
-additionally partition work by country (and, within the largest countries,
-by fixed-size id batches) — this machine has 16 GB RAM and repeatedly hit
-memory/disk limits without it; see `output/BLOCKING_REPORT.md`'s
-"Engineering notes" section for the full story.
-
-## Timings & peak RAM per stage
-
-Measured on this team's dev machine: **Windows laptop, 16 GB RAM (16.8 GB
-as reported by `psutil`), 8 physical / 12 logical CPU cores, CPU only**.
-Wall times are cross-referenced from `output/STEP2_REPORT.md`'s
-cumulative timing table (authoritative for all Step 2 tracks); peak RSS
-figures are from `output/BLOCKING_REPORT.md`'s per-part memory table
-where that finer-grained breakdown exists. Where no peak-RAM number was
-logged for a stage, it's marked "not logged" rather than guessed.
-
-| Stage | Script | Wall time | Peak RAM |
-|---|---|---|---|
-| Step 1: EDA + noise mining + baseline | `first_look.py`, `noise_mining.py`, `sanity_check_metric.py`, `make_empty_submission.py` | seconds-to-low-minutes each (see `output/step1_output.txt`) | not logged |
-| Ingest raw TSVs → parquet | `ingest.py` | ~10s | not logged |
-| Track 1: eval harness + folds/sample | `folds.py`, `evaluate.py` | ~5 min | not logged |
-| Track 2: mine dictionaries | `mine_dicts.py` | ~7 min | <0.25 GB |
-| Track 3a: normalize | `normalize.py` | ~14 min (final run; ~28 min cumulative across the run + the mid-session state-code-bug rerun) | <0.5 GB/worker (`multiprocessing.Pool(4)`) |
-| Track 3b-f: IDF + blocking + candidates | `blocking.py` | ~65 min (final successful run; several hours cumulative across the OOM/segfault/disk-full iterations documented in `BLOCKING_REPORT.md`) | IDF/token tables <1 GB; 300k-sample recall pass (Part E) 1.4 GB; full test candidates (Part F) 3.4 GB |
-| Track 4 Phase 1: feature functions + sanity check | `features.py` | ~15 min | not logged |
-| Track 4 Phase 2: features on real candidates | `features_candidates.py train` / `test` | ~16 min train (×2, one rerun for a missing column), ~102 min test | not logged |
-| Track 5: train + tune + LOCO + predict + validate | `train_model.py` | ~60 min (~43 min train/tune/LOCO + ~17 min test predict/submit/validate) | not logged |
-| Track 5 extra: OOF + worst-20 report | `oof_report.py` | ~11 min | not logged |
-| Package the submission zip | `make_package.py` | seconds (zip/deflate of already-computed outputs; not re-running any pipeline stage) | not logged (dominated by I/O of the ~790 MB `candidate_pairs.tsv`, not compute) |
-
-The "not logged" cells are stages where `perf.py`'s `stage()` timing
-wrapper was used but its RSS logging wasn't captured into either report —
-not evidence those stages are free; `train_model.py` and
-`features_candidates.py` in particular hold multi-million-row feature
-frames and are not expected to be lighter than the Track 3 numbers above.
+- **Normalization**: NFKC; native-script tokens of every Indic script mapped to
+  Latin via mined dictionaries (fallback unidecode) -- the tokenizer keeps Indic
+  combining vowel signs attached (plain `\w` split "शक्ति" into "शक"+"त");
+  state detection prefers full state names over 2-letter codes and the last
+  code over the first; native-script state/city aliases fill in states whose
+  transliteration never matches the Latin name.
+- **Blocking**: key families K1 (number+address word), K2/K5 (rare name /
+  skeleton token + state), K3/K4 (space-less name, wrapper-alt name), K6 (rare
+  name-token pair), K7 (house number with one digit dropped: 1951<->195,
+  A-192<->A-92); block-size caps; cheap score; top-K per S1. Candidates are
+  generated for every train S1 so competition features match test.
+- **Model**: stage 1 LightGBM on ~40 pair features; stage 2 adds how the pair's
+  stage-1 score compares with the S1's other candidates and with the other S1
+  records competing for the same S2/S3 record; cross-fitted isotonic
+  calibration.
+- **Decision**: per S1, the subset (possibly empty) with the highest expected
+  F0.5 under the calibrated probabilities (exact Poisson-binomial), competing
+  against threshold / exclusivity / relative-margin rules; the best by OOF
+  macro F0.5 over every training S1 (blocking misses count) is used.
 
 ## Packaging the final submission
 
-Once `output/matching_results.tsv` and `output/candidate_pairs.tsv` are
-final (i.e. Step 3's blocking/model changes are done and the last
-`train_model.py` run reflects them), build the submission zip:
-
 ```bash
-.venv/Scripts/python.exe code/business_entity_resolution/src/make_package.py
+python code/business_entity_resolution/src/make_package.py
 ```
 
-This writes `<TEAM_NAME>_submission.zip` at the repo root with
-`output/matching_results.tsv` + `output/candidate_pairs.tsv`, a clean copy
-of `code/business_entity_resolution/` (`src/`, excluding `__pycache__`,
-plus `README.md` and `requirements.txt`), and `Documentation_template.md`
-— the exact structure required by the root `README.md`'s "Final
-Submission Package" section. **Edit the `TEAM_NAME` constant at the top of
-`make_package.py` first** — it defaults to the placeholder `"team"`. The
-script prints the full file tree inside the zip and the zip's total size
-when done; it never touches `data/`, `dataset/`, or `.venv/`.
-
-## Status
-
-Steps 1 and 2 complete. See `output/EDA_REPORT.md` (Step 1),
-`output/BLOCKING_REPORT.md` (Step 2 Tracks 2-3 in full detail), and
-`output/STEP2_REPORT.md` (every track summarized, including Track 4/5
-numbers, top feature importances, the worst-20-OOF-entities error analysis,
-and "what I'd try next"). Final test submission
-(`output/matching_results.tsv` + `output/candidate_pairs.tsv`) passes
-`utils/validate_submission.py`.
-
-A Step 3 effort is in progress (separate session/teammate) to raise
-blocking recall past the current 90.75% (chiefly non-Devanagari Indian
-script coverage) and refine the model/decision layer; `requirements.txt`
-already reflects an in-progress addition (`indic_transliteration`) from
-that work as of this writing. Re-run `make_package.py` only after that
-work lands and a fresh `train_model.py` run has produced final outputs.
+Writes `<TEAM_NAME>_submission.zip` (edit `TEAM_NAME` in `make_package.py`
+first) with both output TSVs, this code folder and `Documentation_template.md`.

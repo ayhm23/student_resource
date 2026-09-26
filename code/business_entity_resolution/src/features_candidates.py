@@ -1,23 +1,24 @@
 """Track 4 Phase 2: features for the real blocking candidate pairs.
 
-Reuses ``features.compute_pair_features`` (Phase 1) unchanged, and adds the
-blocking/competition/meta features that only exist once real candidates do:
+Reads the top-K candidate table ``blocking.py`` left in the shared DuckDB
+warehouse (``train_scored`` = candidates for ALL train S1, ``test_scored`` =
+ALL test S1), joins both sides' normalized fields from ``data/norm`` (no raw
+text re-normalization), and streams batches through a worker pool running
+``features.compute_normed_pair_features``. Adds the blocking/competition
+features that only exist once real candidates do:
 
     n_keys_hit, cheap_score, rank_in_s1, n_candidates_for_s1   (blocking)
     n_competitors, rank_among_competitors                       (competition)
-    other_source                                                (meta; already
-                                                                   passed through
-                                                                   by compute_pair_features)
-    label                                                        (train only:
-                                                                   1 if the pair
-                                                                   is in the
-                                                                   ground truth)
+    label                                                       (train only)
 
-Reads the ``{prefix}_scored`` table that ``blocking.py`` left in the shared
-DuckDB warehouse (``db.connect()`` points at the same file, so nothing needs
-re-exporting from blocking.py). Streams in chunks through a multiprocessing
-pool exactly like ``features.py``'s own batch writer, so this scales to the
-tens of millions of test candidate pairs without holding them all in memory.
+Competition features count how many S1 records compete for the same S2/S3
+record. They are computed over the full candidate population of each split --
+all 2.2M train S1, all 1.73M test S1 -- so train and test see the same
+distribution (a 300k train sample used to make these ~7x smaller in train
+than in test).
+
+Every train candidate is featurized, not just a training sample: the stage-2
+model needs stage-1 scores for all of a record's competitors.
 
 Usage: ``python features_candidates.py train`` or ``... test``.
 """
@@ -25,166 +26,134 @@ Usage: ``python features_candidates.py train`` or ``... test``.
 import sys
 import time
 
-import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from config import FEATURES_DIR, RAW_DIR, TRAIN_GT_LONG_PARQUET, raw_parquet_path
+from config import FEATURES_DIR, TRAIN_GT_LONG_PARQUET, norm_parquet_path
 from db import connect
-from features import WORKERS, compute_pair_features, make_pool
-from perf import print_sysinfo, stage, progress_line
+from features import (NAME_FIELDS, ADDR_FIELDS, NORMED_INPUT_COLUMNS, POOL_CHUNKSIZE,
+                      WORKERS, compute_normed_pair_features, make_pool)
+from perf import print_sysinfo, progress_line, stage
+from resources import profile
 
 sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
 
-BATCH_ROWS = 100_000
-
-
-def s23_raw_union_sql(split):
-    """SQL for a (source, id, business_name, business_address, country) union of S2+S3 raw text."""
-    s2 = raw_parquet_path(split, "S2").as_posix()
-    s3 = raw_parquet_path(split, "S3").as_posix()
-    return (f"SELECT 'S2' AS source, id, business_name, business_address, country FROM '{s2}' "
-            f"UNION ALL SELECT 'S3' AS source, id, business_name, business_address, country FROM '{s3}'")
-
-
-def build_candidate_pairs_view(con, split, scored_table, with_label):
-    """Create a view joining the scored candidates with raw text, blocking stats, and (train) labels."""
-    s1_path = raw_parquet_path(split, "S1").as_posix()
-    s23_sql = s23_raw_union_sql(split)
-
-    con.execute(f"CREATE OR REPLACE VIEW v_{scored_table}_s23_raw AS {s23_sql}")
-    con.execute(f"""
-        CREATE OR REPLACE VIEW v_{scored_table}_competition AS
-        SELECT match_id, match_source, count(DISTINCT s1_id) AS n_competitors
-        FROM {scored_table} GROUP BY match_id, match_source
-    """)
-    con.execute(f"""
-        CREATE OR REPLACE VIEW v_{scored_table}_ranked AS
-        SELECT sc.*,
-               row_number() OVER (PARTITION BY sc.match_id, sc.match_source ORDER BY sc.cheap_score DESC) AS rank_among_competitors,
-               count(*) OVER (PARTITION BY sc.s1_id) AS n_candidates_for_s1
-        FROM {scored_table} sc
-    """)
-
-    label_col = ""
-    label_join = ""
-    if with_label:
-        label_col = ", (g.s1_id IS NOT NULL) AS label"
-        label_join = (f"LEFT JOIN '{TRAIN_GT_LONG_PARQUET.as_posix()}' g "
-                       f"ON g.s1_id = r.s1_id AND g.match_id = r.match_id AND g.match_source = r.match_source")
-
-    con.execute(f"""
-        CREATE OR REPLACE VIEW v_{scored_table}_pairs AS
-        SELECT
-            r.s1_id, r.match_id, r.match_source AS other_source,
-            s1.business_name AS s1_name, s1.business_address AS s1_addr, s1.country AS s1_country,
-            o.business_name AS other_name, o.business_address AS other_addr, o.country AS other_country,
-            r.n_keys_hit, r.cheap_score, r.rank_in_s1, r.n_candidates_for_s1,
-            comp.n_competitors, r.rank_among_competitors
-            {label_col}
-        FROM v_{scored_table}_ranked r
-        JOIN '{s1_path}' s1 ON s1.id = r.s1_id
-        JOIN v_{scored_table}_s23_raw o ON o.id = r.match_id AND o.source = r.match_source
-        JOIN v_{scored_table}_competition comp ON comp.match_id = r.match_id AND comp.match_source = r.match_source
-        {label_join}
-    """)
-
-
 BLOCKING_COLS = ["n_keys_hit", "cheap_score", "rank_in_s1", "n_candidates_for_s1",
-                  "n_competitors", "rank_among_competitors"]
+                 "n_competitors", "rank_among_competitors"]
+FEATURE_PARQUET = {
+    "train": FEATURES_DIR / "train_candidates_features.parquet",
+    "test": FEATURES_DIR / "test_candidates_features.parquet",
+}
 
 
-def featurize_candidates(con, split, scored_table, out_path, with_label):
-    """Stream the candidate-pairs view through compute_pair_features and write it to parquet."""
-    build_candidate_pairs_view(con, split, scored_table, with_label)
-    n_total = con.execute(f"SELECT count(*) FROM v_{scored_table}_pairs").fetchone()[0]
-    print(f"  {scored_table}: {n_total} candidate pairs to featurize")
+NORM_COLS = NAME_FIELDS + ADDR_FIELDS
+# Candidate pairs per chunk per GB of DuckDB memory: each chunk materializes
+# its S1 rows and the S2/S3 rows its candidates reference (~1 KB each with all
+# normalized string fields) before joining.
+PAIRS_PER_CHUNK_PER_GB = 700_000
 
-    cols = ["s1_id", "match_id", "s1_name", "s1_addr", "s1_country",
-            "other_name", "other_addr", "other_country", "other_source"] + BLOCKING_COLS
-    if with_label:
-        cols.append("label")
-    result = con.execute(f"SELECT {', '.join(cols)} FROM v_{scored_table}_pairs")
+
+def build_competition_table(con, split):
+    """``{split}_fc_comp``: blocking + competition features for every candidate, with an S1 chunk id."""
+    avg = con.execute(f"SELECT count(*) / greatest(count(DISTINCT s1_id), 1) FROM {split}_scored").fetchone()[0]
+    s1_per_chunk = max(1_000, int(profile().duckdb_light_gb * PAIRS_PER_CHUNK_PER_GB / max(avg, 1)))
+    con.execute(f"""
+        CREATE OR REPLACE TABLE {split}_fc_comp AS
+        SELECT s1_id, match_id, match_source, n_keys_hit, cheap_score, rank_in_s1,
+               count(*) OVER (PARTITION BY s1_id) AS n_candidates_for_s1,
+               count(*) OVER (PARTITION BY match_id, match_source) AS n_competitors,
+               row_number() OVER (PARTITION BY match_id, match_source
+                                  ORDER BY cheap_score DESC, s1_id) AS rank_among_competitors,
+               (dense_rank() OVER (ORDER BY s1_id) - 1) // {s1_per_chunk} AS chunk
+        FROM {split}_scored
+        ORDER BY s1_id
+    """)
+    return con.execute(f"SELECT max(chunk) + 1 FROM {split}_fc_comp").fetchone()[0] or 0
+
+
+def chunk_pairs_sql(con, split, chunk, with_label):
+    """Materialize one S1 chunk's candidates with both sides' normalized fields; return the SELECT."""
+    s1_norm = norm_parquet_path(split, "S1").as_posix()
+    con.execute(f"CREATE OR REPLACE TEMP TABLE _c AS SELECT * FROM {split}_fc_comp WHERE chunk = {chunk}")
+    con.execute(f"""CREATE OR REPLACE TEMP TABLE _a AS
+                    SELECT id, country, {', '.join(NORM_COLS)} FROM '{s1_norm}'
+                    WHERE id IN (SELECT DISTINCT s1_id FROM _c)""")
+    parts = []
+    for src in ("S2", "S3"):
+        path = norm_parquet_path(split, src).as_posix()
+        parts.append(f"""SELECT '{src}' AS source, id, country, {', '.join(NORM_COLS)} FROM '{path}'
+                         WHERE id IN (SELECT DISTINCT match_id FROM _c WHERE match_source = '{src}')""")
+    con.execute(f"CREATE OR REPLACE TEMP TABLE _b AS {' UNION ALL '.join(parts)}")
+    label_col = ", (g.s1_id IS NOT NULL)::INTEGER AS label" if with_label else ""
+    label_join = (f"LEFT JOIN '{TRAIN_GT_LONG_PARQUET.as_posix()}' g ON g.s1_id = c.s1_id "
+                  f"AND g.match_id = c.match_id AND g.match_source = c.match_source") if with_label else ""
+    s1_cols = ", ".join(f"a.{c} AS s1_{c}" for c in NORM_COLS)
+    o_cols = ", ".join(f"b.{c} AS o_{c}" for c in NORM_COLS)
+    return f"""
+        SELECT c.s1_id, c.match_id, c.match_source AS other_source,
+               a.country AS s1_country, b.country AS other_country, {s1_cols}, {o_cols},
+               (b.addr_clean = '' AND b.numbers = '')::DOUBLE AS other_addr_empty,
+               c.n_keys_hit, c.cheap_score, c.rank_in_s1, c.n_candidates_for_s1,
+               c.n_competitors, c.rank_among_competitors {label_col}
+        FROM _c c
+        JOIN _a a ON a.id = c.s1_id
+        JOIN _b b ON b.id = c.match_id AND b.source = c.match_source
+        {label_join}
+    """
+
+
+def featurize_candidates(con, split, with_label):
+    """Featurize every candidate of a split, S1 chunk by S1 chunk, into one parquet file."""
+    with stage(f"competition features over all {split} candidates"):
+        n_chunks = build_competition_table(con, split)
+    n_total = con.execute(f"SELECT count(*) FROM {split}_fc_comp").fetchone()[0]
+    out_path = FEATURE_PARQUET[split]
+    batch_rows = max(100_000, WORKERS * POOL_CHUNKSIZE * 4)
+    print(f"  {split}: {n_total} candidate pairs in {n_chunks} S1 chunks, {WORKERS} feature workers")
+
+    extra = ["s1_id", "match_id", "s1_country"] + BLOCKING_COLS + (["label"] if with_label else [])
+    cols = list(dict.fromkeys(NORMED_INPUT_COLUMNS + extra))
 
     writer = None
     n_seen = 0
     t0 = time.perf_counter()
     with make_pool(WORKERS) as pool:
-        for batch in result.to_arrow_reader(BATCH_ROWS):
-            df = batch.to_pandas()
-            feats = compute_pair_features(df, pool=pool)
-            feats["s1_id"] = df["s1_id"].values
-            feats["match_id"] = df["match_id"].values
-            feats["s1_country"] = df["s1_country"].values
-            for c in BLOCKING_COLS:
-                feats[c] = df[c].values
-            if with_label:
-                feats["label"] = df["label"].astype(int).values
-            table = pa.Table.from_pandas(feats, preserve_index=False)
-            if writer is None:
-                writer = pq.ParquetWriter(str(out_path), table.schema)
-            writer.write_table(table)
-            n_seen += len(df)
-            print(f"  {progress_line(scored_table, n_seen, n_total, t0)}")
+        for chunk in range(n_chunks):
+            sql = chunk_pairs_sql(con, split, chunk, with_label)
+            result = con.execute(f"SELECT {', '.join(cols)} FROM ({sql})")
+            for batch in result.to_arrow_reader(batch_rows):
+                df = batch.to_pandas()
+                feats = compute_normed_pair_features(df, pool)
+                for c in extra:
+                    feats[c] = df[c].values
+                num_cols = [c for c in feats.columns
+                            if feats[c].dtype.kind == "f" and c != "cheap_score"]
+                feats[num_cols] = feats[num_cols].astype("float32")
+                table = pa.Table.from_pandas(feats, preserve_index=False)
+                if writer is None:
+                    writer = pq.ParquetWriter(str(out_path), table.schema)
+                elif table.schema != writer.schema:
+                    table = table.cast(writer.schema)
+                writer.write_table(table)
+                n_seen += len(df)
+            print(f"  chunk {chunk + 1}/{n_chunks} -- {progress_line(split, n_seen, n_total, t0)}")
     if writer is not None:
         writer.close()
+    for t in ("_a", "_b", "_c"):
+        con.execute(f"DROP TABLE IF EXISTS {t}")
     print(f"  saved -> {out_path}")
 
 
-def patch_competitor_counts():
-    """Bug #4 fix (see HANDOFF.md): overwrite n_competitors/rank_among_competitors in the
-    already-computed train features with values from the full-population (2.2M train S1)
-    blocking pass, instead of the 300k-sample-only values baked in by featurize_candidates.
-
-    Pure pandas join, no re-run of compute_pair_features -- the other ~30 feature columns
-    are untouched. Requires blocking.py's "trainfull" mode to have already been run.
-    """
-    feat_path = FEATURES_DIR / "trainsample_candidates_features.parquet"
-    fix_path = FEATURES_DIR / "trainfull_competitor_fix.parquet"
-    feats = pd.read_parquet(feat_path)
-    fix = pd.read_parquet(fix_path).rename(columns={"match_source": "other_source"})
-
-    n_before = len(feats)
-    feats = feats.drop(columns=["n_competitors", "rank_among_competitors"]).merge(
-        fix, on=["s1_id", "match_id", "other_source"], how="left")
-    n_missing = feats["n_competitors"].isna().sum()
-    if n_missing:
-        print(f"[patch-competitors] WARNING: {n_missing}/{n_before} rows had no full-population "
-              f"match -- these should not exist per build_all_keys' per-row-independence guarantee; "
-              f"investigate before trusting this correction.")
-    assert len(feats) == n_before, "row count changed during patch join -- investigate"
-
-    table = pa.Table.from_pandas(feats, preserve_index=False)
-    pq.write_table(table, str(feat_path))
-    print(f"[patch-competitors] patched {n_before} rows -> {feat_path}")
-
-
 def main():
-    """Featurize either the train-sample candidates (labeled) or the full test candidates."""
+    """Featurize all train candidates (labeled) or all test candidates."""
     which = sys.argv[1] if len(sys.argv) > 1 else "train"
-
-    if which == "patch-competitors":
-        with stage("patch competitor counts (bug #4 fix)"):
-            patch_competitor_counts()
-        return
-
+    if which not in ("train", "test"):
+        raise SystemExit(f"unknown arg {which!r}, expected 'train' or 'test'")
     print_sysinfo()
     FEATURES_DIR.mkdir(parents=True, exist_ok=True)
-    con = connect(memory_limit_gb=3, threads=2)
-
-    if which == "train":
-        with stage("featurize train-sample candidates"):
-            featurize_candidates(con, "train", "trainsample_scored",
-                                  FEATURES_DIR / "trainsample_candidates_features.parquet",
-                                  with_label=True)
-    elif which == "test":
-        with stage("featurize test candidates"):
-            featurize_candidates(con, "test", "test_scored",
-                                  FEATURES_DIR / "test_candidates_features.parquet",
-                                  with_label=False)
-    else:
-        raise SystemExit(f"unknown arg {which!r}, expected 'train', 'test', or 'patch-competitors'")
-
+    con = connect(role="light")
+    with stage(f"featurize {which} candidates"):
+        featurize_candidates(con, which, with_label=(which == "train"))
     con.close()
 
 

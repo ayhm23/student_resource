@@ -1,29 +1,37 @@
-"""Step 2 Part C/D/E/F: token IDF, blocking key generation, recall measurement
-on a train sample, and full test candidate generation.
+"""Step 2/3 Part C/D/E/F: token IDF, blocking key generation, candidate
+generation for ALL train S1 and ALL test S1, and recall measurement.
 
 Everything here is DuckDB SQL over the normalized parquet from ``normalize.py``
 -- no per-row Python loops over the full candidate space. Country is part of
 every key (open-set string equality, never a fixed list).
 
+Train candidates are generated for every train S1 record (not a sample): the
+competition features downstream (how many S1 records compete for the same
+S2/S3 record) must be computed over the same population size as test, or the
+model trains on a different distribution than it predicts on.
+
 Pipeline (see ``main()``):
-  1. compute_idf         -- Part C: per (split, country) token document frequency
-  2. build_key_tables     -- per-record top rare tokens/numbers -> the 4 key families
-  3. join_keys            -- S1 keys x S2/S3 keys -> candidate pairs + cheap score
-  4. measure_recall       -- Part E: on a stratified 300k train S1 sample vs full pools
+  1. compute_idf          -- Part C: per (split, country) token document frequency
+  2. build_keys_table     -- per-record top rare tokens/numbers -> key families K1-K7
+  3. join + score_and_topk -- S1 keys x capped S2/S3 keys -> pairs, cheap score, top-K per S1
+  4. measure_recall       -- Part E: recall on the stratified 300k train S1 sample
   5. write_test_candidates -- Part F: full test S1 vs full test S2/S3 pools
+
+Block-size caps, top-K and batch sizes come from the machine resource profile
+(``resources.py``): larger machines get larger caps (more recall).
 """
 
 import random
 import sys
 import time
 
-from config import (BLOCKING_REPORT_PATH, CAND_DIR, DICTS_DIR, FEATURES_DIR,
-                     OUTPUT_DIR, TEST_CANDIDATES_PARQUET, TRAIN_GT_LONG_PARQUET,
+from config import (BLOCKING_REPORT_PATH, CAND_DIR, DICTS_DIR,
+                     TEST_CANDIDATES_PARQUET, TRAIN_GT_LONG_PARQUET,
                      TRAIN_SAMPLE_S1_PARQUET, norm_parquet_path,
                      raw_parquet_path)
 from db import connect
-from io_utils import write_id_list_tsv
 from perf import print_sysinfo, stage, progress_line
+from resources import profile
 
 random.seed(42)
 
@@ -36,13 +44,19 @@ sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
 TOP_NAME_TOKENS = 2
 TOP_ADDR_WORDS = 2
 TOP_NUMBERS = 3
-CAP_DEFAULT = 50  # tuned down from an initial 300: at 300 the raw candidate
-# join produced 56M rows / 49M distinct (s1,match) pairs from just the 300k
-# train sample, which exceeded available memory on this 16GB machine well
-# before it could even reach the top-K cut. See BLOCKING_REPORT.md.
-CAP_K2_NOSTATE = 15  # stricter cap for the (country, name_token) fallback with no state
-TOP_K_PER_S1 = 40
+# Block-size caps: an S2/S3 key shared by more than this many records is
+# dropped (too generic to be informative, and the join explodes). 50/15 is
+# what fits a 16 GB laptop; the profile raises them to 100/25 or 150/40 on
+# bigger machines, which measurably recovers recall (the original cap=300
+# found more true pairs before running out of memory).
+CAP_DEFAULT = profile().cap_default
+CAP_K2_NOSTATE = profile().cap_strict
+STRICT_CAP_KEY_TYPES = ("K2_nostate", "K4_nostate", "K5_nostate", "K6")
+TOP_K_PER_S1 = profile().top_k
 MIN_NOSPACE_LEN = 3
+# K7 only builds deletion variants of numbers at least this long: a 2-digit
+# number's variants are single digits, which match nearly everything.
+K7_MIN_NUM_LEN = 3
 
 
 def norm_view(con, split, source):
@@ -197,8 +211,22 @@ def build_keys_table(con, split, side_view, out_table):
         con.execute(f"DROP TABLE IF EXISTS {out_table}_{suffix}")
 
 
-def generate_key_rows(con, keys_table, out_table):
-    """Explode the top-token/number LISTs into (id, source, country, key_type, key_value) rows."""
+def generate_key_rows(con, keys_table, out_table, side):
+    """Explode the top-token/number LISTs into (id, source, country, key_type, key_value) rows.
+
+    ``side`` is "s1" or "s23". Only K7 depends on it: K7 is a fuzzy house-
+    number key (dropped digit, e.g. 1951<->195, 376<->76, A-192<->A-92) built
+    SymSpell-style from single-digit deletions. To match "one side's number
+    with a digit deleted" against "the other side's number as written" --
+    and never exact-vs-exact, which K1 already covers -- the two variant
+    kinds are tagged crosswise per side:
+
+        S1 deletions  (K7d) == S2/S3 originals (tagged K7d)   S1 has the extra digit
+        S1 originals  (K7o) == S2/S3 deletions (tagged K7o)   S2/S3 has the extra digit
+
+    Joins match on key_type, so this crosswise tagging is all it takes.
+    """
+    orig_tag, del_tag = ("K7o", "K7d") if side == "s1" else ("K7d", "K7o")
     con.execute(f"""
         CREATE OR REPLACE TABLE {out_table} AS
         -- K1: address (country, number, rare_word), up to 3 numbers x 2 rare words
@@ -270,6 +298,25 @@ def generate_key_rows(con, keys_table, out_table):
                country || '|' || least(top_name_tokens[1], top_name_tokens[2])
                        || '|' || greatest(top_name_tokens[1], top_name_tokens[2]) AS key_value
         FROM {keys_table} WHERE len(top_name_tokens) >= 2
+
+        UNION ALL
+        -- K7 originals: (country, number as written, rare address word)
+        SELECT source, id, country, '{orig_tag}' AS key_type,
+               country || '|' || num || '|' || word AS key_value
+        FROM {keys_table}, UNNEST(top_numbers) AS t1(num), UNNEST(top_addr_words) AS t2(word)
+
+        UNION ALL
+        -- K7 deletions: every single-digit deletion of numbers >= K7_MIN_NUM_LEN
+        -- digits (leading zeros stripped, since numbers are stored as integers)
+        SELECT DISTINCT source, id, country, '{del_tag}' AS key_type,
+               country || '|' || v || '|' || word AS key_value
+        FROM (
+            SELECT source, id, country, word,
+                   unnest(list_transform(range(1, length(num) + 1),
+                          lambda i: ltrim(substr(num, 1, i - 1) || substr(num, i + 1), '0'))) AS v
+            FROM {keys_table}, UNNEST(top_numbers) AS t1(num), UNNEST(top_addr_words) AS t2(word)
+            WHERE length(num) >= {K7_MIN_NUM_LEN}
+        ) WHERE v <> ''
     """)
 
 
@@ -288,7 +335,7 @@ def cap_s23_keys(con, s23_key_table, out_table):
         -- meaning it produces large, redundant blocks in dense countries
         -- (India); that same leakiness pushed a full test run past a 116GB
         -- temp-disk limit even with per-batch chunking.
-        WHERE c.n <= CASE WHEN k.key_type IN ('K2_nostate', 'K4_nostate', 'K5_nostate', 'K6') THEN {CAP_K2_NOSTATE} ELSE {CAP_DEFAULT} END
+        WHERE c.n <= CASE WHEN k.key_type IN {STRICT_CAP_KEY_TYPES} THEN {CAP_K2_NOSTATE} ELSE {CAP_DEFAULT} END
     """)
 
 
@@ -386,43 +433,47 @@ def score_and_topk(con, split, pairs_table, out_table, top_k=TOP_K_PER_S1):
     """)
     for t in ("cand_s23", "s23_name_tok", "s23_addr_tok"):
         con.execute(f"DROP TABLE IF EXISTS {out_table}_{t}")
+    # The top-K cut happens HERE, before anything downstream: every pair kept
+    # is featurized and scored by the model, so an uncut table would make
+    # feature volume grow with the blocking caps instead of with top_k.
     con.execute(f"""
         CREATE OR REPLACE TABLE {out_table} AS
-        SELECT p.s1_id, p.match_id, p.match_source, p.n_keys_hit,
-               (p.n_keys_hit + coalesce(sn.shared_name_idf, 0) + coalesce(sa.shared_addr_idf, 0)) AS cheap_score,
-               row_number() OVER (PARTITION BY p.s1_id ORDER BY
-                   (p.n_keys_hit + coalesce(sn.shared_name_idf, 0) + coalesce(sa.shared_addr_idf, 0)) DESC,
-                   p.match_id) AS rank_in_s1
-        FROM {out_table}_agg p
-        LEFT JOIN {out_table}_shared_name sn USING (s1_id, match_id, match_source)
-        LEFT JOIN {out_table}_shared_addr sa USING (s1_id, match_id, match_source)
+        SELECT * FROM (
+            SELECT p.s1_id, p.match_id, p.match_source, p.n_keys_hit,
+                   (p.n_keys_hit + coalesce(sn.shared_name_idf, 0) + coalesce(sa.shared_addr_idf, 0)) AS cheap_score,
+                   row_number() OVER (PARTITION BY p.s1_id ORDER BY
+                       (p.n_keys_hit + coalesce(sn.shared_name_idf, 0) + coalesce(sa.shared_addr_idf, 0)) DESC,
+                       p.match_source, p.match_id) AS rank_in_s1
+            FROM {out_table}_agg p
+            LEFT JOIN {out_table}_shared_name sn USING (s1_id, match_id, match_source)
+            LEFT JOIN {out_table}_shared_addr sa USING (s1_id, match_id, match_source)
+        ) WHERE rank_in_s1 <= {top_k}
     """)
+    for t in ("agg", "shared_name", "shared_addr"):
+        con.execute(f"DROP TABLE IF EXISTS {out_table}_{t}")
 
 
-S1_BATCH_SIZE = 75_000  # halved after adding K5/K6: their extra candidate
-# volume pushed a 150k-row batch past a 116GB temp-disk limit on Part F
+# S1 rows per blocking batch, sized from the profile (75k was the measured
+# safe size at 4 GB of DuckDB memory with caps 50/15).
+S1_BATCH_SIZE = profile().s1_batch_size
 
 
-def build_all_keys(con, split, s1_view, prefix):
+def build_all_keys(con, split, s1_view, prefix, keep_raw_filter=None):
     """Build keys, join, and score candidate pairs -- one (country, S1 batch) at a time.
 
-    ``s1_view`` lets Part E score a 300k S1 sample against the FULL S2/S3 pool
-    while Part F scores all of test S1 the same way -- one code path for both.
-    Returns the name of the final scored-with-rank table (union of every
-    country/batch).
+    Returns the name of the final top-K scored table ``{prefix}_scored``
+    (union of every country/batch). The raw per-key hits are only needed for
+    the per-key-type recall breakdown, so they are kept (as
+    ``{prefix}_pairs_raw``) only for S1 rows matching ``keep_raw_filter`` (a
+    SQL condition on ``s1_id``), and dropped otherwise -- for all 2.2M train S1
+    they would be hundreds of millions of rows.
 
-    The S2/S3 side is built ONCE per country (it doesn't depend on which S1
-    batch is being scored) and reused across that country's S1 batches. The
-    S1 side is additionally split into fixed-size batches of
-    ``S1_BATCH_SIZE`` records within each country: Part E's 300k-row sample
-    (effectively ~120-180k per country) ran fine per-country, but Part F's
-    full test S1 set has 660k-810k records in its largest countries, and
-    scoring a country that large in one pass still exhausted both memory and
-    a temp-spill limit of 116 GB on the D: scratch drive. Batching the S1
-    side bounds every pass to roughly the same size regardless of how big a
-    single country's test population is. Country alone still guarantees
-    correctness (blocking keys always include country, so results never
-    depend on how S1 is chunked within a country).
+    The S2/S3 side is built ONCE per country and reused across that country's
+    S1 batches. The S1 side is split into ``S1_BATCH_SIZE``-row batches within
+    each country, which bounds every join to roughly the same size no matter
+    how large one country's population is. Blocking keys always include the
+    country and are computed per record, so results never depend on how S1 is
+    chunked.
     """
     countries = [r[0] for r in con.execute(f"SELECT DISTINCT country FROM v_{split}_S23_norm").fetchall()]
     scored_parts = []
@@ -462,15 +513,16 @@ def build_all_keys(con, split, s1_view, prefix):
         s23_keys_raw, s23_keys = f"{split}_s23_keys_raw_c{i}", f"{split}_s23_keys_c{i}"
         s23_keys_capped = f"{split}_s23_keys_capped_c{i}"
         build_keys_table(con, split, f"v_{split}_S23_norm_part", s23_keys_raw)
-        generate_key_rows(con, s23_keys_raw, s23_keys)
+        generate_key_rows(con, s23_keys_raw, s23_keys, side="s23")
         cap_s23_keys(con, s23_keys, s23_keys_capped)
         con.execute(f"DROP TABLE IF EXISTS {s23_keys_raw}")
         con.execute(f"DROP TABLE IF EXISTS {s23_keys}")
 
         n_country = con.execute(f"SELECT count(*) FROM v_{split}_s1_country").fetchone()[0]
         n_batches = max(1, -(-n_country // S1_BATCH_SIZE))  # ceil division
+        numbered = f"{prefix}_s1_numbered_c{i}"
         con.execute(f"""
-            CREATE OR REPLACE VIEW v_{split}_s1_country_numbered AS
+            CREATE OR REPLACE TABLE {numbered} AS
             SELECT *, (row_number() OVER (ORDER BY id) - 1) // {S1_BATCH_SIZE} AS _batch
             FROM v_{split}_s1_country
         """)
@@ -480,18 +532,22 @@ def build_all_keys(con, split, s1_view, prefix):
             batch_t0 = time.perf_counter()
             con.execute(
                 f"CREATE OR REPLACE VIEW v_{split}_s1_batch AS "
-                f"SELECT * EXCLUDE (_batch) FROM v_{split}_s1_country_numbered WHERE _batch = {b}"
+                f"SELECT * EXCLUDE (_batch) FROM {numbered} WHERE _batch = {b}"
             )
             s1_keys_raw, s1_keys = f"{prefix}_s1_keys_raw_c{i}_b{b}", f"{prefix}_s1_keys_c{i}_b{b}"
             build_keys_table(con, split, f"v_{split}_s1_batch", s1_keys_raw)
-            generate_key_rows(con, s1_keys_raw, s1_keys)
+            generate_key_rows(con, s1_keys_raw, s1_keys, side="s1")
 
             pairs_raw = f"{prefix}_pairs_raw_c{i}_b{b}"
             join_candidate_pairs(con, s1_keys, s23_keys_capped, pairs_raw)
             scored_part = f"{prefix}_scored_c{i}_b{b}"
             score_and_topk(con, split, pairs_raw, scored_part)
             scored_parts.append(scored_part)
-            pairs_raw_parts.append(pairs_raw)
+            if keep_raw_filter:
+                kept = f"{pairs_raw}_kept"
+                con.execute(f"CREATE OR REPLACE TABLE {kept} AS SELECT * FROM {pairs_raw} WHERE {keep_raw_filter}")
+                pairs_raw_parts.append(kept)
+            con.execute(f"DROP TABLE IF EXISTS {pairs_raw}")
 
             con.execute(f"DROP TABLE IF EXISTS {s1_keys_raw}")
             con.execute(f"DROP TABLE IF EXISTS {s1_keys}")
@@ -502,15 +558,15 @@ def build_all_keys(con, split, s1_view, prefix):
                   f"{progress_line('overall', batches_done, total_batches, run_t0)}")
 
         con.execute(f"DROP TABLE IF EXISTS {s23_keys_capped}")
+        con.execute(f"DROP TABLE IF EXISTS {numbered}")
         print(f"  [{prefix}] country {i + 1}/{len(countries)} ({country}): "
               f"ALL batches done in {time.perf_counter() - country_t0:.1f}s")
 
-    # kept (not dropped per-batch) since measure_recall's per-key-type
-    # recall breakdown needs the raw, un-aggregated key hits
-    union_sql = " UNION ALL ".join(f"SELECT * FROM {t}" for t in pairs_raw_parts)
-    con.execute(f"CREATE OR REPLACE TABLE {prefix}_pairs_raw AS {union_sql}")
-    for t in pairs_raw_parts:
-        con.execute(f"DROP TABLE IF EXISTS {t}")
+    if pairs_raw_parts:
+        union_sql = " UNION ALL ".join(f"SELECT * FROM {t}" for t in pairs_raw_parts)
+        con.execute(f"CREATE OR REPLACE TABLE {prefix}_pairs_raw AS {union_sql}")
+        for t in pairs_raw_parts:
+            con.execute(f"DROP TABLE IF EXISTS {t}")
 
     union_sql = " UNION ALL ".join(f"SELECT * FROM {t}" for t in scored_parts)
     con.execute(f"CREATE OR REPLACE TABLE {prefix}_scored AS {union_sql}")
@@ -519,12 +575,19 @@ def build_all_keys(con, split, s1_view, prefix):
     return f"{prefix}_scored"
 
 
-RECALL_K_SWEEP = (10, 20, 30, 40, 60)
+RECALL_K_SWEEP = tuple(k for k in (5, 10, 20, 30, 40, 50) if k <= TOP_K_PER_S1)
 RECALL_TARGET = 0.97
+SAMPLE_FILTER = f"s1_id IN (SELECT id FROM '{TRAIN_SAMPLE_S1_PARQUET.as_posix()}')"
+
+
+def build_train_candidates(con):
+    """Block ALL train S1 against the full train S2/S3 pools (raw key hits kept for the recall sample)."""
+    with stage("Part E: build+score all train-S1 vs full train pools"):
+        return build_all_keys(con, "train", "v_train_S1_norm", "train", keep_raw_filter=SAMPLE_FILTER)
 
 
 def measure_recall(con):
-    """Part E: measure blocking recall on the 300k train S1 sample vs full train pools.
+    """Part E: measure blocking recall on the 300k train S1 sample (candidates from the full train run).
 
     Returns (report_lines, chosen_k) where ``report_lines`` is ready to drop
     into BLOCKING_REPORT.md and ``chosen_k`` is the smallest swept K reaching
@@ -532,12 +595,15 @@ def measure_recall(con):
     """
     sample_path = TRAIN_SAMPLE_S1_PARQUET.as_posix()
     gt_path = TRAIN_GT_LONG_PARQUET.as_posix()
-    lines = []
+    lines = [f"Caps: default={CAP_DEFAULT}, strict={CAP_K2_NOSTATE} {STRICT_CAP_KEY_TYPES}; "
+             f"top_k per S1={TOP_K_PER_S1}; S1 batch={S1_BATCH_SIZE}"]
 
     con.execute(f"""
         CREATE OR REPLACE VIEW v_train_S1_sample_norm AS
         SELECT n.* FROM v_train_S1_norm n JOIN '{sample_path}' s ON n.id = s.id
     """)
+    con.execute(f"CREATE OR REPLACE VIEW trainsample_scored AS SELECT * FROM train_scored WHERE {SAMPLE_FILTER}")
+    con.execute("CREATE OR REPLACE VIEW trainsample_pairs_raw AS SELECT * FROM train_pairs_raw")
     n_sample = con.execute("SELECT count(*) FROM v_train_S1_sample_norm").fetchone()[0]
     con.execute(f"""
         CREATE OR REPLACE TABLE trainsample_gt AS
@@ -549,8 +615,7 @@ def measure_recall(con):
     lines.append(f"Sample S1 entities: {n_sample}")
     lines.append(f"True (S1,match) pairs among sample: {n_true_pairs}, across {n_nonsingleton} non-singleton S1 entities")
 
-    with stage("Part E: build+score sample-S1 vs full-pool candidates"):
-        scored_table = build_all_keys(con, "train", "v_train_S1_sample_norm", "trainsample")
+    scored_table = "trainsample_scored"
 
     con.execute("""
         CREATE OR REPLACE TABLE trainsample_gt_hits AS
@@ -688,72 +753,25 @@ def measure_recall(con):
 
 
 # ---------------------------------------------------------------------------
-# Part G: full-train-S1 competitor counts (bug #4 fix -- see HANDOFF.md)
-# ---------------------------------------------------------------------------
-
-def write_trainfull_competitor_counts(con):
-    """Block ALL 2.2M train S1 (not the 300k sample) to get true competitor counts.
-
-    ``trainsample_scored``'s ``n_competitors``/``rank_among_competitors`` (used
-    as features) only reflect competition among the 300k-row train sample,
-    while the same features at test time reflect competition among the full
-    1.73M test S1 -- a real train/test covariate shift. Blocking keys are
-    computed per-S1-row independent of which other S1 rows are in the same
-    batch, so ``trainsample_scored``'s (s1_id, match_id, match_source) triples
-    are a strict subset of this full run's -- every training row will find a
-    match in the join below. Saves a small correction table (~3 columns) that
-    ``features_candidates.py``'s ``patch-competitors`` mode joins onto the
-    already-computed 9.9M-row training features, instead of re-running the
-    (slow, rapidfuzz-heavy) full feature computation.
-    """
-    scored_table = build_all_keys(con, "train", "v_train_S1_norm", "trainfull")
-
-    con.execute(f"""
-        CREATE OR REPLACE TABLE trainfull_competitor_fix AS
-        SELECT s1_id, match_id, match_source,
-               count(*) OVER (PARTITION BY match_id, match_source) AS n_competitors,
-               row_number() OVER (PARTITION BY match_id, match_source ORDER BY cheap_score DESC) AS rank_among_competitors
-        FROM {scored_table}
-        WHERE (s1_id, match_id, match_source) IN (
-            SELECT s1_id, match_id, match_source FROM trainsample_scored
-        )
-    """)
-    n_fixed = con.execute("SELECT count(*) FROM trainfull_competitor_fix").fetchone()[0]
-    n_sample = con.execute("SELECT count(*) FROM trainsample_scored").fetchone()[0]
-    print(f"[trainfull] corrected {n_fixed}/{n_sample} training candidate rows "
-          f"with full-population (2.2M train S1) competitor counts")
-    if n_fixed != n_sample:
-        print(f"[trainfull] WARNING: {n_sample - n_fixed} training rows had no match in the "
-              f"full-population run -- investigate before trusting the correction.")
-
-    FEATURES_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = FEATURES_DIR / "trainfull_competitor_fix.parquet"
-    con.execute(f"COPY trainfull_competitor_fix TO '{out_path.as_posix()}' (FORMAT PARQUET)")
-    print(f"[trainfull] saved -> {out_path}")
-
-
-# ---------------------------------------------------------------------------
 # Part F: full test candidates
 # ---------------------------------------------------------------------------
 
-def write_test_candidates(con, chosen_k):
-    """Part F: block all test S1 against the full test S2/S3 pools; write outputs."""
+def write_test_candidates(con):
+    """Part F: block all test S1 against the full test S2/S3 pools; export the top-K candidates."""
     lines = []
     with stage("Part F: build+score all test-S1 vs full test pools"):
         scored_table = build_all_keys(con, "test", "v_test_S1_norm", "test")
 
-    con.execute(f"""
-        CREATE OR REPLACE TABLE test_final_candidates AS
-        SELECT s1_id, match_id, match_source, n_keys_hit, cheap_score, rank_in_s1
-        FROM {scored_table} WHERE rank_in_s1 <= {chosen_k}
-    """)
     CAND_DIR.mkdir(parents=True, exist_ok=True)
-    con.execute(f"COPY test_final_candidates TO '{TEST_CANDIDATES_PARQUET.as_posix()}' (FORMAT PARQUET)")
+    con.execute(f"COPY (SELECT s1_id, match_id, match_source, n_keys_hit, cheap_score, rank_in_s1 "
+                f"FROM {scored_table}) TO '{TEST_CANDIDATES_PARQUET.as_posix()}' (FORMAT PARQUET)")
 
     total_s1 = con.execute(f"SELECT count(*) FROM '{raw_parquet_path('test', 'S1').as_posix()}'").fetchone()[0]
-    s1_with_cands = con.execute("SELECT count(DISTINCT s1_id) FROM test_final_candidates").fetchone()[0]
+    s1_with_cands = con.execute(f"SELECT count(DISTINCT s1_id) FROM {scored_table}").fetchone()[0]
+    n_pairs = con.execute(f"SELECT count(*) FROM {scored_table}").fetchone()[0]
     lines.append(f"Test S1 entities: {total_s1}; with >=1 candidate: {s1_with_cands} "
-                 f"({100.0 * s1_with_cands / total_s1:.2f}%); with 0 candidates: {total_s1 - s1_with_cands}")
+                 f"({100.0 * s1_with_cands / total_s1:.2f}%); with 0 candidates: {total_s1 - s1_with_cands}; "
+                 f"candidate pairs (top-{TOP_K_PER_S1}): {n_pairs}")
 
     lines.append("\nCandidates per S1 by country:")
     rows = con.execute(f"""
@@ -761,7 +779,7 @@ def write_test_candidates(con, chosen_k):
                median(coalesce(c.n, 0)) AS median_cand, max(coalesce(c.n, 0)) AS max_cand,
                sum(CASE WHEN c.n IS NULL OR c.n = 0 THEN 1 ELSE 0 END) AS zero_cand
         FROM '{raw_parquet_path("test", "S1").as_posix()}' s
-        LEFT JOIN (SELECT s1_id, count(*) AS n FROM test_final_candidates GROUP BY s1_id) c ON c.s1_id = s.id
+        LEFT JOIN (SELECT s1_id, count(*) AS n FROM {scored_table} GROUP BY s1_id) c ON c.s1_id = s.id
         GROUP BY s.country
     """).fetchall()
     for country, n_s1, mean_cand, median_cand, max_cand, zero_cand in rows:
@@ -770,84 +788,59 @@ def write_test_candidates(con, chosen_k):
     lines.append("\n(France has no training labels; a much higher zero-candidate or low-candidate rate "
                  "for France above than US/India would mean the mined dictionaries/keys, which are all "
                  "trained on US/India pairs, generalize poorly to French names/addresses.)")
-
-    # write candidate_pairs.tsv (Part F output) using the same shape as matching_results.tsv
-    ids_all = [r[0] for r in con.execute(f"SELECT id FROM '{raw_parquet_path('test', 'S1').as_posix()}'").fetchall()]
-    cand_map = {s1_id: [] for s1_id in ids_all}
-    for s1_id, match_id, match_source in con.execute(
-        "SELECT s1_id, match_id, match_source FROM test_final_candidates ORDER BY s1_id, rank_in_s1"
-    ).fetchall():
-        cand_map[s1_id].append(f"{match_source}-{match_id}")
-    str_cand_map = {f"S1-{k}": v for k, v in cand_map.items()}
-    OUTPUT_DIR.mkdir(exist_ok=True)
-    write_id_list_tsv(OUTPUT_DIR / "candidate_pairs.tsv", "candidate_entity_ids", str_cand_map)
-    lines.append(f"\nWrote {OUTPUT_DIR / 'candidate_pairs.tsv'} ({len(str_cand_map)} rows).")
-
+    lines.append("(output/candidate_pairs.tsv is written by train_model.py together with "
+                 "matching_results.tsv, from exactly the pairs the model scores.)")
     return lines
 
 
+def prepare_split(con, split):
+    """Views, IDF and token tables one split's blocking needs."""
+    for source in ("S1", "S2", "S3"):
+        norm_view(con, split, source)
+    all_norm_union(con, split)
+    s23_norm_union(con, split)
+    with stage(f"compute IDF ({split})"):
+        compute_idf(con, split)
+    with stage(f"build token tables ({split})"):
+        build_token_tables(con, split)
+
+
 def main():
-    """Run Parts C-F: IDF, key generation, train-sample recall, test candidates.
+    """Run Parts C-F: IDF, key generation, all-train-S1 candidates + recall, test candidates.
 
-    Pass "train-only" as the first CLI arg to stop after Part E (train-sample
-    recall) and skip the much more expensive Part F (full test candidates) --
-    used to validate a blocking change's recall impact cheaply before paying
-    for the full test run.
-
-    Pass "trainfull" to instead run ONLY Part G (full 2.2M train S1 blocking,
-    for the n_competitors train/test-mismatch fix -- see HANDOFF.md). Requires
-    Part E to have already been run in this warehouse (needs trainsample_scored
-    to exist), but does not need Part F.
+    CLI arg (optional):
+      train-only  -- train candidates + recall report only (cheap check of a blocking change)
+      test-only   -- test candidates only (resume after a finished train pass)
     """
-    import sys as _sys
-    arg = _sys.argv[1] if len(_sys.argv) > 1 else ""
-    train_only = arg == "train-only"
-    trainfull_only = arg == "trainfull"
+    arg = sys.argv[1] if len(sys.argv) > 1 else ""
+    if arg not in ("", "train-only", "test-only"):
+        raise SystemExit(f"unknown arg {arg!r}; expected nothing, 'train-only' or 'test-only'")
+    do_train, do_test = arg != "test-only", arg != "train-only"
 
     print_sysinfo()
-    con = connect(memory_limit_gb=4, threads=2)
-
-    if trainfull_only:
-        for source in ("S1", "S2", "S3"):
-            norm_view(con, "train", source)
-        all_norm_union(con, "train")
-        s23_norm_union(con, "train")
-        with stage("compute IDF (train)"):
-            compute_idf(con, "train")
-        with stage("build token tables (train)"):
-            build_token_tables(con, "train")
-        with stage("Part G: full-train-S1 competitor counts"):
-            write_trainfull_competitor_counts(con)
-        con.close()
-        return
-
-    splits = ("train",) if train_only else ("train", "test")
-
+    print(f"[blocking] caps default={CAP_DEFAULT} strict={CAP_K2_NOSTATE}, top_k={TOP_K_PER_S1}, "
+          f"S1 batch={S1_BATCH_SIZE}")
+    con = connect(role="heavy")
     report = []
-    for split in splits:
-        for source in ("S1", "S2", "S3"):
-            norm_view(con, split, source)
-        all_norm_union(con, split)
-        s23_norm_union(con, split)
-        with stage(f"compute IDF ({split})"):
-            compute_idf(con, split)
-        with stage(f"build token tables ({split})"):
-            build_token_tables(con, split)
 
-    report.append("=== Part E: recall measurement on 300k train S1 sample vs full train pools ===")
-    e_lines, chosen_k = measure_recall(con)
-    report.extend(e_lines)
+    if do_train:
+        prepare_split(con, "train")
+        build_train_candidates(con)
+        report.append("=== Part E: recall on the 300k train S1 sample (candidates from all-train-S1 blocking) ===")
+        e_lines, _ = measure_recall(con)
+        report.extend(e_lines)
 
-    if train_only:
-        print("\ntrain-only mode: skipping Part F (full test candidates).")
-    else:
+    if do_test:
+        prepare_split(con, "test")
         report.append("\n\n=== Part F: full test candidate generation ===")
-        f_lines = write_test_candidates(con, chosen_k)
-        report.extend(f_lines)
+        report.extend(write_test_candidates(con))
 
     report_text = "\n".join(report)
     print("\n" + report_text)
-    out_path = BLOCKING_REPORT_PATH.with_name("BLOCKING_REPORT_v2_trainonly.md") if train_only else BLOCKING_REPORT_PATH
+    if arg == "":
+        out_path = BLOCKING_REPORT_PATH
+    else:
+        out_path = BLOCKING_REPORT_PATH.with_name(f"BLOCKING_REPORT_{arg.replace('-', '_')}.md")
     out_path.write_text(report_text, encoding="utf-8")
     print(f"\nSaved raw report text to {out_path}")
 

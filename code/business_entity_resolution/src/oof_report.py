@@ -1,124 +1,86 @@
-"""Track 5 follow-up: persist OOF probabilities and report the 20 worst OOF entities.
+"""Track 5 follow-up: report the 20 worst out-of-fold training entities.
 
-Retrains the identical 5-fold LightGBM model (same seed, same data) as
-``train_model.py`` -- deterministic, so this reproduces the same OOF values
--- and additionally:
-  * saves OOF probabilities to ``data/features/oof_probs.parquet``
-  * applies the best decision rule found by ``train_model.py`` (relative,
-    t=0.65, alpha=0.7) to build per-S1 predictions from OOF
-  * finds the 20 non-singleton sample S1 entities with the worst per-entity
-    F0.5 and prints their raw records (S1 + its true matches) alongside what
-    was actually predicted, for the STEP2_REPORT.md error-analysis section.
+Reads what ``train_model.py`` saved -- ``data/features/oof_stage2.parquet``
+(every training candidate row with its OOF probability and the decision rule's
+``pred`` flag) and ``data/training_s1.parquet`` -- so nothing is retrained.
+Prints the 20 non-singleton training S1 entities with the lowest per-entity
+F0.5, with raw text for the S1 record, its true matches, and what was predicted
+(including true matches blocking never produced as candidates).
 """
 
 import sys
 
+import duckdb
 import pandas as pd
 
-import train_model as tm
-from config import FEATURES_DIR, OUTPUT_DIR, TRAIN_GT_LONG_PARQUET, raw_parquet_path
-from io_utils import f05, split_ids
+from config import DATA_DIR, FEATURES_DIR, OUTPUT_DIR, TRAIN_GT_LONG_PARQUET, raw_parquet_path
+from io_utils import f05
 from perf import print_sysinfo, stage
 
 sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
 
-BEST_VARIANT, BEST_T, BEST_ALPHA = "relative", 0.65, 0.7
 
-
-def raw_text_lookup(ids, split, source):
-    """Return {id: (business_name, business_address)} for the given ids from one raw source."""
-    path = raw_parquet_path(split, source).as_posix()
-    import duckdb
-    con = duckdb.connect()
-    ids_list = list(ids)
-    rows = con.execute(
+def raw_text_lookup(ids, source):
+    """Return {id: (business_name, business_address)} for the given ids from one raw train source."""
+    if not ids:
+        return {}
+    path = raw_parquet_path("train", source).as_posix()
+    rows = duckdb.connect().execute(
         f"SELECT id, business_name, business_address FROM '{path}' WHERE id IN "
-        f"({','.join(str(i) for i in ids_list)})"
-    ).fetchall()
-    con.close()
+        f"({','.join(str(int(i)) for i in ids)})").fetchall()
     return {i: (n, a) for i, n, a in rows}
 
 
 def main():
-    """Retrain (deterministic), save OOF probs, and report the 20 worst OOF entities."""
     print_sysinfo()
-    with stage("load + train (reproduces train_model.py's OOF exactly)"):
-        df = tm.load_train_candidates()
-        oof, models, importances = tm.train_cv(df)
+    with stage("load OOF predictions + ground truth"):
+        oof = pd.read_parquet(FEATURES_DIR / "oof_stage2.parquet")
+        training = pd.read_parquet(DATA_DIR / "training_s1.parquet")
+        gt = pd.read_parquet(TRAIN_GT_LONG_PARQUET)
+        gt = gt[gt["s1_id"].isin(set(training["s1_id"]))]
 
-    FEATURES_DIR.mkdir(parents=True, exist_ok=True)
-    oof_df = df[["s1_id", "match_id", "other_source", "label", "fold"]].copy()
-    oof_df["oof_prob"] = oof
-    oof_path = FEATURES_DIR / "oof_probs.parquet"
-    oof_df.to_parquet(oof_path)
-    print(f"Saved OOF probabilities -> {oof_path}")
-
-    with stage("build OOF predictions with the best decision rule"):
-        work = df[["s1_id", "match_id", "other_source"]].copy()
-        work["p"] = oof
-        excl_work = tm._apply_exclusivity(work)
-        best_p = tm._best_p_per_s1(df, oof)
-        rel_work = excl_work.join(best_p.rename("s1_best_p"), on="s1_id")
-        rel_work = rel_work[rel_work["p"] >= BEST_ALPHA * rel_work["s1_best_p"]]
-        pred_map = tm._pred_map_from_work(rel_work, BEST_T)
-
-    gt = pd.read_parquet(TRAIN_GT_LONG_PARQUET)
+    src_name = {0: "S2", 1: "S3"}
+    pred_map, cand_map = {}, {}
+    for s1, mid, src, pred in zip(oof["s1_id"], oof["match_id"], oof["src"], oof["pred"]):
+        key = f"{src_name[int(src)]}-{mid}"
+        cand_map.setdefault(s1, set()).add(key)
+        if pred:
+            pred_map.setdefault(s1, set()).add(key)
     gt_map = {}
-    for s1_id, sub in gt.groupby("s1_id"):
-        gt_map[s1_id] = set(f"{src}-{mid}" for mid, src in zip(sub["match_id"], sub["match_source"]))
+    for s1, mid, src in zip(gt["s1_id"], gt["match_id"], gt["match_source"]):
+        gt_map.setdefault(s1, set()).add(f"{src}-{mid}")
 
-    sample_ids = df["s1_id"].unique().tolist()
-    scored = []
-    for s1_id in sample_ids:
-        true_set = gt_map.get(s1_id, set())
-        if not true_set:
-            continue  # worst-entity report is over non-singletons, per the task spec
-        pred_set = pred_map.get(s1_id, set())
-        scored.append((s1_id, f05(pred_set, true_set), true_set, pred_set))
-    scored.sort(key=lambda x: x[1])
-    worst20 = scored[:20]
+    scored = sorted(((f05(pred_map.get(s1, set()), true), s1, true) for s1, true in gt_map.items()),
+                    key=lambda x: x[0])
+    worst = scored[:20]
 
-    print("\n=== 20 worst OOF non-singleton entities (lowest per-entity F0.5) ===")
-    all_ids = set()
-    for s1_id, _, true_set, pred_set in worst20:
-        all_ids.add(s1_id)
-        for mid in true_set | pred_set:
-            all_ids.add(mid)
-    s1_ids_needed = [i for i in all_ids if isinstance(i, int)]
-    s2_ids_needed = [int(i.split("-")[1]) for i in all_ids if isinstance(i, str) and i.startswith("S2-")]
-    s3_ids_needed = [int(i.split("-")[1]) for i in all_ids if isinstance(i, str) and i.startswith("S3-")]
-    s1_text = raw_text_lookup(s1_ids_needed, "train", "S1") if s1_ids_needed else {}
-    s2_text = raw_text_lookup(s2_ids_needed, "train", "S2") if s2_ids_needed else {}
-    s3_text = raw_text_lookup(s3_ids_needed, "train", "S3") if s3_ids_needed else {}
+    need = {"S1": set(), "S2": set(), "S3": set()}
+    for _, s1, true in worst:
+        need["S1"].add(s1)
+        for k in true | pred_map.get(s1, set()):
+            src, mid = k.split("-")
+            need[src].add(int(mid))
+    text = {src: raw_text_lookup(sorted(ids), src) for src, ids in need.items()}
 
-    def lookup(id_str_or_int):
-        if isinstance(id_str_or_int, int):
-            return s1_text.get(id_str_or_int, ("?", "?"))
-        src, mid = id_str_or_int.split("-")
-        mid = int(mid)
-        return (s2_text if src == "S2" else s3_text).get(mid, ("<missing>", "<missing>"))
-
-    report_lines = []
-    for s1_id, entity_f05, true_set, pred_set in worst20:
-        name, addr = lookup(s1_id)
-        line = f"\nS1-{s1_id} (F0.5={entity_f05:.3f}): {name!r} | {addr!r}"
-        print(line); report_lines.append(line)
-        line = f"  TRUE matches ({len(true_set)}):"
-        print(line); report_lines.append(line)
-        for mid in sorted(true_set):
-            n, a = lookup(mid)
-            line = f"    {mid}: {n!r} | {a!r}"
-            print(line); report_lines.append(line)
-        line = f"  PREDICTED ({len(pred_set)}):"
-        print(line); report_lines.append(line)
-        for mid in sorted(pred_set):
-            n, a = lookup(mid)
-            tag = "correct" if mid in true_set else "WRONG"
-            line = f"    {mid} [{tag}]: {n!r} | {a!r}"
-            print(line); report_lines.append(line)
-
+    lines = []
+    for score, s1, true in worst:
+        pred = pred_map.get(s1, set())
+        name, addr = text["S1"].get(s1, ("?", "?"))
+        lines.append(f"\nS1-{s1} (F0.5={score:.3f}): {name!r} | {addr!r}")
+        lines.append(f"  TRUE matches ({len(true)}):")
+        for k in sorted(true):
+            src, mid = k.split("-")
+            tag = "" if k in cand_map.get(s1, set()) else "  [never a candidate: BLOCKING MISS]"
+            n, a = text[src].get(int(mid), ("?", "?"))
+            lines.append(f"    {k}: {n!r} | {a!r}{tag}")
+        lines.append(f"  PREDICTED ({len(pred)}):")
+        for k in sorted(pred):
+            src, mid = k.split("-")
+            n, a = text[src].get(int(mid), ("?", "?"))
+            lines.append(f"    {k} [{'correct' if k in true else 'WRONG'}]: {n!r} | {a!r}")
+    print("\n".join(lines))
     out_path = OUTPUT_DIR / "worst20_oof_entities.txt"
-    out_path.write_text("\n".join(report_lines), encoding="utf-8")
+    out_path.write_text("\n".join(lines), encoding="utf-8")
     print(f"\nSaved -> {out_path}")
 
 

@@ -20,18 +20,23 @@ repeated letters collapsed) -- meant to survive transliteration/typo
 spelling variance that breaks exact/prefix token matching.
 
 Per-record text work is pure Python (regex/unidecode), so it is parallelized
-with ``multiprocessing.Pool`` over chunks read from DuckDB -- never a
-row-by-row pandas ``.apply`` over the full file.
+with a spawn-context ``multiprocessing.Pool`` (sized from the machine profile)
+over chunks read from DuckDB -- never a row-by-row pandas ``.apply``.
+
+Native-script (all Indic scripts, not just Devanagari) tokens are mapped to
+their Latin form with the dictionaries ``mine_dicts.py`` mines from matched
+train pairs, falling back to unidecode. A native-script state/city alias
+dictionary (also mined) fills in ``state`` for native-script addresses whose
+state name would otherwise transliterate to something unrecognisable.
 """
 
 import json
+import multiprocessing as mp
 import re
 import sys
 import unicodedata
-from multiprocessing import Pool
 from pathlib import Path
 
-import duckdb
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -41,12 +46,11 @@ from config import (DICTS_DIR, NORM_DIR, SOURCES, SPLITS, norm_parquet_path,
                      raw_parquet_path)
 from db import connect
 from perf import print_sysinfo, stage
+from resources import profile
 
 sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
 
-CHUNK_ROWS = 100_000
 POOL_CHUNKSIZE = 2000
-WORKERS = 4  # conservative: this machine often has only a few GB free RAM
 
 # Plain \w does not match Indic combining vowel signs/virama (Unicode
 # categories Mn/Mc), so it shreds native-script words at every vowel sign --
@@ -64,7 +68,7 @@ INDIC_BLOCKS = ("ऀ-ॿ"  # Devanagari
                 "ಀ-೿"  # Kannada
                 "ഀ-ൿ")  # Malayalam
 WORD_RE = re.compile(rf"[\w{INDIC_BLOCKS}]+", re.UNICODE)
-DEVANAGARI_RE = re.compile(r"[ऀ-ॿ]")
+INDIC_RE = re.compile(rf"[{INDIC_BLOCKS}]")
 DOTTED_INITIALS_RE = re.compile(r"\b(?:[a-z]\.){2,}")
 NONALNUM_RE = re.compile(r"[^a-z0-9\s]")
 HASH_DIGITS_RE = re.compile(r"#\d+")
@@ -103,8 +107,9 @@ def _load_json(dicts_dir, name):
 
 def _init_worker(dicts_dir):
     """Multiprocessing pool initializer: load all mined dictionaries once per worker."""
-    dev_name = _load_json(dicts_dir, "devanagari_name_map.json")
-    dev_addr = _load_json(dicts_dir, "devanagari_addr_map.json")
+    native_name = _load_json(dicts_dir, "native_name_map.json")
+    native_addr = _load_json(dicts_dir, "native_addr_map.json")
+    state_alias_india = _load_json(dicts_dir, "state_alias_india.json")
     addr_abbr = _load_json(dicts_dir, "address_abbrev_map.json")
     us_states = _load_json(dicts_dir, "state_map_us.json")
     india_states = _load_json(dicts_dir, "state_map_india.json")
@@ -127,8 +132,9 @@ def _init_worker(dicts_dir):
     _G["other_state_codes"] = set(other_states.values())
     _G["other_state_keys_by_len"] = sorted(other_states.keys(), key=lambda k: -len(k.split()))
 
-    _G["dev_name"] = {k: v["map"] for k, v in dev_name.items()}
-    _G["dev_addr"] = {k: v["map"] for k, v in dev_addr.items()}
+    _G["native_name"] = {k: v["map"] for k, v in native_name.items()}
+    _G["native_addr"] = {k: v["map"] for k, v in native_addr.items()}
+    _G["state_alias"] = {"India": {k: v["state"] for k, v in state_alias_india.items()}}
     _G["addr_abbr"] = addr_abbr
     _G["street_tokens"] = set(addr_abbr.keys()) | set(addr_abbr.values())
     _G["legal_forms"] = set(legal_counts.keys()) | {"sarl", "sas", "sasu", "eurl", "sa", "snc", "sci"}
@@ -141,20 +147,38 @@ def _clean_separator(tok):
     return re.sub(r"[^a-z0-9]", "", unidecode(tok).lower())
 
 
-def _base_clean(text, devanagari_map):
+def native_tokens(text):
+    """NFKC-normalized word tokens of ``text`` that contain any Indic-script character."""
+    return [t for t in WORD_RE.findall(unicodedata.normalize("NFKC", text)) if INDIC_RE.search(t)]
+
+
+def native_ngrams(text):
+    """Native-script bigrams then unigrams of ``text``, each list ordered from the END of the string.
+
+    Used for the mined native state-alias dictionary: states sit at the end of
+    an address, and a multi-word state name ("तमिल नाडु") must be tried as a
+    phrase before its parts.
+    """
+    toks = native_tokens(text)
+    bigrams = [f"{toks[i]} {toks[i + 1]}" for i in range(len(toks) - 2, -1, -1)]
+    return bigrams + toks[::-1]
+
+
+def _base_clean(text, native_map):
     """Shared name/address cleaning pipeline; returns a deduped token list.
 
-    NFKC normalize -> map Devanagari tokens (fallback unidecode) -> unidecode
-    remaining accents -> lowercase -> "&"->" and " -> drop "#<digits>" tags ->
-    join dotted initials (l.l.c.->llc) -> strip punctuation -> collapse spaces
-    -> dedupe repeated tokens (order-preserving).
+    NFKC normalize -> map native-script (any Indic script) tokens via the mined
+    dictionary (fallback unidecode) -> unidecode remaining accents -> lowercase
+    -> "&"->" and " -> drop "#<digits>" tags -> join dotted initials
+    (l.l.c.->llc) -> strip punctuation -> collapse spaces -> dedupe repeated
+    tokens (order-preserving).
     """
     text = unicodedata.normalize("NFKC", text)
 
     def repl(m):
         tok = m.group(0)
-        if DEVANAGARI_RE.search(tok):
-            mapped = devanagari_map.get(tok)
+        if INDIC_RE.search(tok):
+            mapped = native_map.get(tok)
             return mapped if mapped else unidecode(tok)
         return tok
 
@@ -197,7 +221,7 @@ def skeleton_join(tokens):
 
 def normalize_name(name):
     """Compute name_clean/name_main/name_alt/name_core/name_nospace/name_sorted_chars/legal_form/name_skeleton."""
-    tokens = _base_clean(name, _G["dev_name"])
+    tokens = _base_clean(name, _G["native_name"])
     name_clean = " ".join(tokens)
 
     name_main, name_alt = name_clean, ""
@@ -310,6 +334,18 @@ def _apply_state_and_abbrev(tokens, country):
     return out, state_found
 
 
+def native_state_alias(address, country):
+    """State code from the mined native-script alias dictionary, or '' (last match in the address wins)."""
+    aliases = _G["state_alias"].get(country)
+    if not aliases or not INDIC_RE.search(address):
+        return ""
+    for gram in native_ngrams(address):
+        code = aliases.get(gram)
+        if code:
+            return code
+    return ""
+
+
 def _drop_addr_keywords(tokens):
     """Drop 'city', the 'po box <n>' phrase, and no/door/flat/plot/house/shop keywords."""
     out = []
@@ -353,8 +389,10 @@ def extract_numbers(address):
 def normalize_addr(address, country):
     """Compute addr_clean/numbers/state/addr_words/addr_skeleton for one address string."""
     numbers = extract_numbers(address)
-    tokens = _base_clean(address, _G["dev_addr"])
+    tokens = _base_clean(address, _G["native_addr"])
     tokens, state_found = _apply_state_and_abbrev(tokens, country)
+    if not state_found:
+        state_found = native_state_alias(address, country)
     tokens = _drop_addr_keywords(tokens)
     addr_clean = " ".join(tokens)
     street_tokens = _G["street_tokens"]
@@ -377,15 +415,25 @@ def _process_row(row):
     return out
 
 
-def process_source(split, source, pool):
+def make_pool(workers):
+    """Spawn-context pool with the dictionaries preloaded in every worker.
+
+    Spawn (not Linux's default fork): forking a process that already has live
+    DuckDB threads can deadlock the child on a lock one of those threads held.
+    """
+    return mp.get_context("spawn").Pool(processes=workers, initializer=_init_worker,
+                                         initargs=(str(DICTS_DIR),))
+
+
+def process_source(split, source, pool, chunk_rows):
     """Stream one raw source parquet through the pool, writing its norm parquet."""
     raw_path = raw_parquet_path(split, source).as_posix()
     out_path = norm_parquet_path(split, source)
     NORM_DIR.mkdir(parents=True, exist_ok=True)
 
-    con = connect()
+    con = connect(role="light")
     result = con.execute(f"SELECT id, business_name, business_address, country FROM '{raw_path}'")
-    reader = result.to_arrow_reader(CHUNK_ROWS)
+    reader = result.to_arrow_reader(chunk_rows)
 
     writer = None
     total = 0
@@ -438,13 +486,16 @@ def print_examples(con):
 def main():
     """Normalize every train/test source file and print before/after examples."""
     print_sysinfo()
-    with Pool(processes=WORKERS, initializer=_init_worker, initargs=(str(DICTS_DIR),)) as pool:
+    workers = profile().workers_normalize
+    chunk_rows = max(100_000, workers * POOL_CHUNKSIZE * 4)
+    print(f"[normalize] {workers} worker processes, {chunk_rows} rows per chunk")
+    with make_pool(workers) as pool:
         for split in SPLITS:
             for source in SOURCES:
                 with stage(f"normalize {split}_{source}"):
-                    process_source(split, source, pool)
+                    process_source(split, source, pool, chunk_rows)
 
-    con = connect()
+    con = connect(role="light")
     with stage("print before/after examples"):
         print_examples(con)
     con.close()

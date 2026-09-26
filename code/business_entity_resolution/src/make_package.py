@@ -103,6 +103,7 @@ def build_package(zip_path: Path) -> Path:
             zf.write(src_path, arcname=f"code/business_entity_resolution/src/{rel.as_posix()}")
 
         zf.write(CODE_DIR / "README.md", arcname="code/business_entity_resolution/README.md")
+        zf.write(CODE_DIR / "run_pipeline.py", arcname="code/business_entity_resolution/run_pipeline.py")
         zf.write(
             CODE_DIR / "requirements.txt",
             arcname="code/business_entity_resolution/requirements.txt",

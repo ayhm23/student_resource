@@ -75,7 +75,7 @@ def build_folds(df):
 def main():
     """Build the 300k stratified sample and the full 5-fold GroupKFold assignment."""
     print_sysinfo()
-    con = connect(memory_limit_gb=4, threads=4)
+    con = connect(role="light")
 
     with stage("load id/country"):
         df = load_id_country(con)

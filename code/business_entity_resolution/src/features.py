@@ -37,10 +37,29 @@ Step 3 Track B addition: ``name_skeleton_ratio``/``_token_set_ratio``/
 transliteration/typo spelling variance (e.g. unidecode's "yuunivrsl" and
 plain "universal" both fold toward the same skeleton) that the raw-token
 metrics above cannot see past.
+
+Step 3 v3 additions, each aimed at a specific miss/false-match pattern:
+* ``name_contain_a_in_b`` / ``name_contain_b_in_a``: share of each side's
+  name tokens found in the other (exact or as a prefix) -- truncated names
+  ("Premier Constructions Priv" vs "Premier Constructions Private Limited").
+* ``name_token_substring_cov``: share of one side's tokens found as substrings
+  of the other's space-less name -- domain-style names ("walkerskannur.com"
+  vs "Kannur Walkers").
+* ``addr_num_near_match``: some pair of house numbers is one digit apart
+  (1951 vs 195, 376 vs 76) -- the same corruption the K7 blocking key targets.
+* ``name_unshared_a`` / ``name_unshared_b``: count of name tokens each side has
+  that the other lacks -- planted look-alikes ("Housing Council II" vs
+  "Housing Council DI") that score high on every ratio metric.
+
+Two entry points: ``compute_pair_features`` normalizes raw text itself (used
+by the Phase 1 sanity check below), and ``compute_normed_pair_features`` takes
+both sides' already-normalized fields from ``data/norm`` (used for the tens of
+millions of real candidate pairs, where re-normalizing both records for every
+pair was about half the cost).
 """
 
+import multiprocessing as mp
 import sys
-from multiprocessing import Pool
 from pathlib import Path
 
 import numpy as np
@@ -48,17 +67,25 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 from rapidfuzz import fuzz
-from rapidfuzz.distance import JaroWinkler
+from rapidfuzz.distance import JaroWinkler, Levenshtein
 
 import normalize
 from config import DICTS_DIR, FEATURES_DIR, RAW_DIR, raw_parquet_path
 from db import connect
 from perf import print_sysinfo, stage
+from resources import profile
 
 sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
 
-WORKERS = 2  # conservative: this machine is often down to a few GB free RAM
+WORKERS = profile().workers_features
 POOL_CHUNKSIZE = 2000
+
+NAME_FIELDS = ["name_clean", "name_main", "name_alt", "name_core", "name_nospace",
+               "name_sorted_chars", "legal_form", "name_skeleton"]
+ADDR_FIELDS = ["addr_clean", "numbers", "state", "addr_words", "addr_skeleton"]
+NORMED_INPUT_COLUMNS = ([f"s1_{f}" for f in NAME_FIELDS + ADDR_FIELDS]
+                        + [f"o_{f}" for f in NAME_FIELDS + ADDR_FIELDS]
+                        + ["s1_country", "other_country", "other_source", "other_addr_empty"])
 BATCH_ROWS = 100_000
 NEG_SEED = 42
 
@@ -70,9 +97,17 @@ _WARNED = {"name": False, "addr": False}
 
 
 def _load_idf_map(path):
-    """Load an idf_{name,addr}_train.parquet file into a {(country, token): idf} dict."""
+    """Load an idf_{name,addr}_train.parquet file into a {country: {token: idf}} dict.
+
+    Nested per country (not one dict keyed by (country, token) tuples): same
+    lookups, but no tuple object per entry, which matters when every worker
+    process holds its own copy of several million entries.
+    """
     df = pd.read_parquet(path, columns=["country", "token", "idf"])
-    return dict(zip(zip(df["country"], df["token"]), df["idf"]))
+    out = {}
+    for country, sub in df.groupby("country", sort=False):
+        out[country] = dict(zip(sub["token"], sub["idf"].astype(float)))
+    return out
 
 
 def _init_pool(dicts_dir, idf_name_path, idf_addr_path):
@@ -139,6 +174,40 @@ def _set_jaccard(tokens_a, tokens_b):
     return len(set_a & set_b) / len(union) if union else np.nan
 
 
+def _token_containment(tokens_a, tokens_b):
+    """Share of ``tokens_a`` present in ``tokens_b`` exactly or as a prefix either way (>= 3 chars)."""
+    if not tokens_a or not tokens_b:
+        return np.nan
+    set_b = set(tokens_b)
+    hits = 0
+    for t in tokens_a:
+        if t in set_b or (len(t) >= 3 and any(
+                u.startswith(t) or (len(u) >= 3 and t.startswith(u)) for u in tokens_b)):
+            hits += 1
+    return hits / len(tokens_a)
+
+
+def _substring_coverage(tokens, nospace_other):
+    """Share of ``tokens`` (>= 3 chars) that occur inside the other side's space-less name."""
+    long_toks = [t for t in tokens if len(t) >= 3]
+    if not long_toks or not nospace_other:
+        return np.nan
+    return sum(1 for t in long_toks if t in nospace_other) / len(long_toks)
+
+
+def _numbers_near(nums_a, nums_b):
+    """1.0 if some pair of distinct numbers (one >= 2 digits) is one digit edit apart, else 0.0."""
+    for x in nums_a:
+        sx = str(x)
+        for y in nums_b:
+            if x == y:
+                continue
+            sy = str(y)
+            if max(len(sx), len(sy)) >= 2 and Levenshtein.distance(sx, sy) == 1:
+                return 1.0
+    return 0.0
+
+
 def _idf_jaccard_and_rarest(tokens_a, tokens_b, idf_map, country):
     """IDF-weighted Jaccard of two token lists, plus the rarest shared/unshared token IDF.
 
@@ -153,9 +222,10 @@ def _idf_jaccard_and_rarest(tokens_a, tokens_b, idf_map, country):
     if not union:
         return np.nan, np.nan, np.nan
     inter = set_a & set_b
+    cmap = idf_map.get(country, {})
 
     def idf(tok):
-        return idf_map.get((country, tok), 0.0)
+        return cmap.get(tok, 0.0)
 
     w_inter = sum(idf(t) for t in inter)
     w_union = sum(idf(t) for t in union)
@@ -174,11 +244,26 @@ def _name_features(s1_n, o_n, country, idf_map):
     ratio = partial = tsort = tset = jw = -1.0
     nospace_ratio = nospace_contains = sorted_ratio = -1.0
     skeleton_ratio = skeleton_tset = skeleton_jaccard = -1.0
+    contain_ab = contain_ba = substring_cov = -1.0
+    unshared_a = unshared_b = np.nan
     best_jaccard, best_shared_idf, best_unshared_idf = -1.0, np.nan, np.nan
 
     for va in variants_a:
         for vb in variants_b:
             if va["core"] and vb["core"]:
+                toks_a, toks_b = va["core"].split(), vb["core"].split()
+                c_ab = _token_containment(toks_a, toks_b)
+                c_ba = _token_containment(toks_b, toks_a)
+                contain_ab = max(contain_ab, c_ab)
+                contain_ba = max(contain_ba, c_ba)
+                ua, ub = len(set(toks_a) - set(toks_b)), len(set(toks_b) - set(toks_a))
+                if np.isnan(unshared_a) or ua + ub < unshared_a + unshared_b:
+                    unshared_a, unshared_b = ua, ub
+                for cov in (_substring_coverage(toks_b, va["nospace"]),
+                            _substring_coverage(toks_a, vb["nospace"])):
+                    if not np.isnan(cov):
+                        substring_cov = max(substring_cov, cov)
+
                 ratio = max(ratio, fuzz.ratio(va["core"], vb["core"]))
                 partial = max(partial, fuzz.partial_ratio(va["core"], vb["core"]))
                 tsort = max(tsort, fuzz.token_sort_ratio(va["core"], vb["core"]))
@@ -234,6 +319,11 @@ def _name_features(s1_n, o_n, country, idf_map):
         "name_skeleton_ratio": _clean(skeleton_ratio),
         "name_skeleton_token_set_ratio": _clean(skeleton_tset),
         "name_skeleton_jaccard": _clean(skeleton_jaccard),
+        "name_contain_a_in_b": _clean(contain_ab),
+        "name_contain_b_in_a": _clean(contain_ba),
+        "name_token_substring_cov": _clean(substring_cov),
+        "name_unshared_a": unshared_a,
+        "name_unshared_b": unshared_b,
         "legal_form_match": legal_form_match,
         "s1_name_len": len_a,
         "other_name_len": len_b,
@@ -241,7 +331,7 @@ def _name_features(s1_n, o_n, country, idf_map):
     }
 
 
-def _addr_features(s1_a, o_a, other_addr_raw, country, idf_map):
+def _addr_features(s1_a, o_a, other_addr_empty, country, idf_map):
     """Compute all address-side features for one pair from their normalize_addr() dicts."""
     addr_a, addr_b = s1_a["addr_clean"], o_a["addr_clean"]
     if addr_a and addr_b:
@@ -256,8 +346,9 @@ def _addr_features(s1_a, o_a, other_addr_raw, country, idf_map):
         num_jaccard = len(inter) / len(union) if union else np.nan
         num_shared_count = len(inter)
         num_max_equal = 1.0 if max(nums_a) == max(nums_b) else 0.0
+        num_near = _numbers_near(nums_a, nums_b)
     else:
-        num_jaccard = num_shared_count = num_max_equal = np.nan
+        num_jaccard = num_shared_count = num_max_equal = num_near = np.nan
 
     state_a, state_b = s1_a["state"], o_a["state"]
     if not state_a or not state_b:
@@ -275,10 +366,34 @@ def _addr_features(s1_a, o_a, other_addr_raw, country, idf_map):
         "addr_num_jaccard": num_jaccard,
         "addr_num_max_equal": num_max_equal,
         "addr_num_shared_count": num_shared_count,
+        "addr_num_near_match": num_near,
         "addr_state_match": state_match,
         "addr_idf_jaccard": idf_jaccard,
-        "other_addr_empty": 1.0 if _is_blank(other_addr_raw) else 0.0,
+        "other_addr_empty": other_addr_empty,
     }
+
+
+def _compute_normed(row):
+    """Feature row for one pair given as a tuple in NORMED_INPUT_COLUMNS order (already normalized)."""
+    rec = dict(zip(NORMED_INPUT_COLUMNS, row))
+    s1_n = {f: rec[f"s1_{f}"] or "" for f in NAME_FIELDS}
+    o_n = {f: rec[f"o_{f}"] or "" for f in NAME_FIELDS}
+    s1_a = {f: rec[f"s1_{f}"] or "" for f in ADDR_FIELDS}
+    o_a = {f: rec[f"o_{f}"] or "" for f in ADDR_FIELDS}
+    country = rec["s1_country"] or rec["other_country"] or ""
+    feats = {}
+    feats.update(_name_features(s1_n, o_n, country, _W.get("idf_name")))
+    feats.update(_addr_features(s1_a, o_a, float(rec["other_addr_empty"]), country, _W.get("idf_addr")))
+    feats["other_source"] = rec["other_source"] or ""
+    return feats
+
+
+def compute_normed_pair_features(df, pool, chunksize=POOL_CHUNKSIZE):
+    """Features for a DataFrame holding NORMED_INPUT_COLUMNS (both sides' normalized fields)."""
+    if df.empty:
+        return pd.DataFrame()
+    rows = list(df[NORMED_INPUT_COLUMNS].itertuples(index=False, name=None))
+    return pd.DataFrame(pool.map(_compute_normed, rows, chunksize=chunksize))
 
 
 def _compute_one(pair):
@@ -299,7 +414,8 @@ def _compute_one(pair):
     country = s1_country or other_country
     feats = {}
     feats.update(_name_features(s1_n, o_n, country, _W.get("idf_name")))
-    feats.update(_addr_features(s1_a, o_a, other_addr, country, _W.get("idf_addr")))
+    feats.update(_addr_features(s1_a, o_a, 1.0 if _is_blank(other_addr) else 0.0, country,
+                                _W.get("idf_addr")))
     feats["other_source"] = other_source
     return feats
 
@@ -317,7 +433,10 @@ def make_pool(workers=WORKERS, dicts_dir=None, idf_name_path=None, idf_addr_path
     """
     dicts_dir = str(dicts_dir) if dicts_dir else str(DICTS_DIR)
     name_path, addr_path = _resolve_idf_paths(idf_name_path, idf_addr_path)
-    return Pool(processes=workers, initializer=_init_pool, initargs=(dicts_dir, name_path, addr_path))
+    # spawn, not Linux's default fork: the parent holds live DuckDB threads,
+    # and forking a multithreaded process can deadlock the child.
+    return mp.get_context("spawn").Pool(processes=workers, initializer=_init_pool,
+                                         initargs=(dicts_dir, name_path, addr_path))
 
 
 def compute_pair_features(pairs, pool=None, workers=WORKERS, chunksize=POOL_CHUNKSIZE,
@@ -462,9 +581,12 @@ NUMERIC_FEATURE_COLS = [
     "name_ratio", "name_partial_ratio", "name_token_sort_ratio", "name_token_set_ratio",
     "name_jaro_winkler", "name_nospace_ratio", "name_nospace_contains", "name_sorted_chars_ratio",
     "name_idf_jaccard", "name_idf_rarest_shared", "name_idf_rarest_unshared",
+    "name_skeleton_ratio", "name_skeleton_token_set_ratio", "name_skeleton_jaccard",
+    "name_contain_a_in_b", "name_contain_b_in_a", "name_token_substring_cov",
+    "name_unshared_a", "name_unshared_b",
     "s1_name_len", "other_name_len", "name_len_absdiff",
     "addr_token_set_ratio", "addr_token_sort_ratio", "addr_num_jaccard", "addr_num_max_equal",
-    "addr_num_shared_count", "addr_idf_jaccard", "other_addr_empty",
+    "addr_num_shared_count", "addr_num_near_match", "addr_idf_jaccard", "other_addr_empty",
 ]
 CATEGORICAL_FEATURE_COLS = ["legal_form_match", "addr_state_match", "other_source"]
 
@@ -478,7 +600,7 @@ def print_separation_report(parquet_path):
     (weak separation) or whose NaN rate exceeds 50% in either class.
     """
     path = Path(parquet_path).as_posix()
-    con = connect(memory_limit_gb=2, threads=2)
+    con = connect(role="light")
     n_pos, n_neg = con.execute(
         f"SELECT sum((label=1)::INT), sum((label=0)::INT) FROM '{path}'"
     ).fetchone()
@@ -539,7 +661,7 @@ def main():
     print_sysinfo()
     FEATURES_DIR.mkdir(parents=True, exist_ok=True)
     out_path = FEATURES_DIR / "train_gt_vs_negatives.parquet"
-    con = connect(memory_limit_gb=2, threads=2)
+    con = connect(role="light")
 
     with stage("count positives"):
         n_pos = con.execute(

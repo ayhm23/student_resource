@@ -61,19 +61,18 @@ def detect_script(text):
 
 
 def load_missed_and_cut(con):
-    """Return two DataFrames: precut misses, and cut-by-topK misses (rank_in_s1 > 60)."""
+    """Return two DataFrames: precut misses (no key hit), and pairs hit by a key but cut by top-K."""
     precut = con.execute("""
         SELECT s1_id, match_id, match_source, country
         FROM trainsample_gt_hits
         WHERE hit_key_types IS NULL OR len(hit_key_types) = 0
     """).df()
     cut = con.execute("""
-        SELECT g.s1_id, g.match_id, g.match_source, s.country AS country
-        FROM trainsample_gt g
-        JOIN trainsample_scored sc ON sc.s1_id = g.s1_id AND sc.match_id = g.match_id
-            AND sc.match_source = g.match_source
-        JOIN v_train_S1_sample_norm s ON s.id = g.s1_id
-        WHERE sc.rank_in_s1 > 60
+        SELECT h.s1_id, h.match_id, h.match_source, h.country
+        FROM trainsample_gt_hits h
+        LEFT JOIN trainsample_scored sc ON sc.s1_id = h.s1_id AND sc.match_id = h.match_id
+            AND sc.match_source = h.match_source
+        WHERE len(h.hit_key_types) > 0 AND sc.s1_id IS NULL
     """).df()
     return precut, cut
 
@@ -129,7 +128,7 @@ def annotate(df, con):
 def main():
     """Diagnose blocking v1 misses on the train sample and print/save a stage x script report."""
     print_sysinfo()
-    con = connect(memory_limit_gb=3, threads=2)
+    con = connect(role="light")
 
     with stage("load precut/cut-by-topK misses"):
         precut, cut = load_missed_and_cut(con)

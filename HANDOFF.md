@@ -1,7 +1,7 @@
 # Handoff — Amazon ML Challenge 2026, Business Entity Resolution
 
 Read this first in a new chat/session to pick up exactly where this one left
-off. This doc is a snapshot as of **2026-09-26, ~14:35 IST**. Give this whole
+off. This doc is a snapshot as of **2026-09-26, evening IST** (v3 pipeline). Give this whole
 file to Claude at the start of a new conversation and say "continue from
 HANDOFF.md" — that's enough context to resume without re-deriving anything.
 
@@ -21,34 +21,58 @@ HANDOFF.md" — that's enough context to resume without re-deriving anything.
   below). On a bigger machine, things will be much simpler and faster — see
   "If you're now on a better machine" at the bottom.
 
-## TODO (not yet started): the post-bug-fix rebuild chain
+## Current state (2026-09-26 evening): v3 pipeline, full rerun
 
-Three real bugs (below) were found and fixed in `normalize.py`/`mine_dicts.py`/
-`blocking.py`/`features_candidates.py` on 2026-09-26, but **the rebuild these
-fixes require has NOT been run yet** — code is fixed and pushed (commit
-`d19161c`), data/artifacts are still the pre-fix versions. This is next,
-whenever/wherever (this machine or the lab machine) picks it up:
+All items from the pasted lab-machine report are now implemented (not just the
+3 bugs), the pipeline is modular and machine-sized, and a full rerun is the
+next/ongoing step. **How to run anywhere** (Ubuntu: `bash setup_ubuntu.sh`
+first):
 
 ```bash
-cd student_resource
-.venv/Scripts/python.exe code/business_entity_resolution/src/mine_dicts.py                       # ~7 min
-.venv/Scripts/python.exe code/business_entity_resolution/src/normalize.py                        # ~17 min
-.venv/Scripts/python.exe code/business_entity_resolution/src/blocking.py                         # ~90 min
-.venv/Scripts/python.exe code/business_entity_resolution/src/blocking.py trainfull               # ~90-115 min (NEW, bug #4 fix)
-.venv/Scripts/python.exe code/business_entity_resolution/src/features.py                         # ~15 min
-.venv/Scripts/python.exe code/business_entity_resolution/src/features_candidates.py train        # ~16 min
-.venv/Scripts/python.exe code/business_entity_resolution/src/features_candidates.py patch-competitors  # ~1-2 min (NEW)
-.venv/Scripts/python.exe code/business_entity_resolution/src/features_candidates.py test          # ~100 min
-.venv/Scripts/python.exe code/business_entity_resolution/src/train_model.py                       # ~60 min
+python code/business_entity_resolution/run_pipeline.py            # everything
+python code/business_entity_resolution/run_pipeline.py --from features_train   # resume
 ```
 
-**Total estimate: ~6.5-7 hours on this machine** (should be much faster on
-the lab machine once its environment issue is fixed — see "If you're now on
-a better machine"). Cheaper alternative if you just want to validate the
-bug-#1/#3 recall improvement before committing to the full chain: run only
-the first 3 steps above (`mine_dicts.py` → `normalize.py` → `blocking.py
-train-only`, ~114 min) and check `output/BLOCKING_REPORT_v2_trainonly.md`
-for the new recall number before deciding whether to continue.
+Progress lives in `output/logs/pipeline_status.json` + `output/logs/<step>.log`.
+Result lands in `output/MODEL_REPORT.md` (OOF macro F0.5 over every training S1,
+blocking misses included) and `output/results_log.csv`.
+
+What changed in v3 (see `code/business_entity_resolution/README.md` for detail):
+- **Portability/sizing**: `src/resources.py` derives RAM budget, workers,
+  DuckDB memory/threads, blocking caps (50/15 -> 100/25 -> 150/40), top-K
+  (40/50), S1 batch size and training-set size from the machine; `BER_*` env
+  vars override. Scratch dir: `BER_SCRATCH_DIR`, else `D:/ber_scratch` on
+  Windows, else `data/scratch`. Worker pools use spawn (fork next to DuckDB
+  threads can deadlock on Linux). `run_pipeline.py` replaces the manual
+  command list (interpreter-agnostic, so `.venv/bin` vs `.venv/Scripts` no
+  longer matters -- the likely reason the lab run failed).
+- **Normalization**: native-script maps now cover every Indic script with
+  skeleton-based alignment for unequal-length pairs (files renamed
+  `native_{name,addr}_map.json`); mined native-script state/city aliases
+  (`state_alias_india.json`); the tokenizer and state-priority fixes below.
+- **Blocking**: candidates for ALL 2.2M train S1 (the 300k sample is now only
+  the recall-measurement subset) so competition features match test; K7
+  fuzzy house-number key (single-digit deletion, 1951<->195, 376<->76);
+  top-K cut actually applied in `score_and_topk` (it was computed but never
+  applied -- so bug #6 of the report DID apply to us; my earlier "we already
+  have it" was wrong); blocking no longer overwrites `candidate_pairs.tsv`.
+- **Features**: computed from the normalized parquet (no per-pair
+  re-normalization, ~2x faster); 6 new features (name containment both
+  ways, token-substring coverage for domain names, one-digit house-number
+  match, unshared-token counts both ways); competition features over the
+  full population per split.
+- **Model**: two-stage LightGBM (stage 2 sees stage-1 scores of the S1's other
+  candidates and of competing S1 records), float32/Dataset.subset training
+  sized to RAM, cross-fitted isotonic calibration, per-S1 expected-F0.5
+  decision rule (exact Poisson-binomial, verified against brute force)
+  competing with the old threshold/exclusive/relative rules on OOF.
+- The earlier narrow bug-#4 patch (`blocking.py trainfull` +
+  `features_candidates.py patch-competitors`) is gone -- superseded by
+  blocking all train S1 directly.
+
+Timing on this laptop depends heavily on free RAM (the profile shrinks
+everything when little is free); expect roughly 7-9 hours with ~3 GB free,
+much less with apps closed, and far less on a big Linux box.
 
 ## Bugs found + fixed (2026-09-26, this continuation)
 
@@ -97,19 +121,14 @@ bugs here; the rest either didn't apply or are already-known deferred work.
    them into the existing 9.9M-row `trainsample_candidates_features.parquet`
    by `(s1_id, match_id)` join — no need to re-run `compute_pair_features`.
 
-**Checked, doesn't apply to us:** native-script state dictionaries (we
-don't have one — nothing to be "half-mapped"), blocking-OOM-from-joining-
-on-common-words (our join is already keyed on `(country, key_type,
-key_value)` + chunked, different mechanism, already solved), missing
-top-K cut before featurizing (we already have `TOP_K_PER_S1`).
+**Checked, doesn't apply to us:** blocking-OOM-from-joining-on-common-words
+(our join is keyed on `(country, key_type, key_value)` + chunked).
+Correction: the "missing top-K cut" item DID apply (the rank was computed
+but never used as a filter) -- fixed in v3.
 
-**Checked, real ideas but correctly deferred** (already tracked as Step 3
-P1/P2, intentionally not done this session): raising blocking caps on a
-bigger machine (biggest lever, see "If you're now on a better machine"
-below), a fuzzy house-number blocking key (new idea, not yet built), 4 new
-pair features beyond what we have (name containment ratio, domain-style
-name match, off-by-one house number, unshared-word count), the two-stage
-model (Track C4), and a per-S1 expected-F0.5 decision rule (Track D).
+**The rest of the report's items (native state aliases, raised caps, fuzzy
+house-number key, new pair features, two-stage model, expected-F0.5
+decision rule) were all implemented in v3** -- see "Current state" above.
 
 **Because bugs #1 and #2 above are inside `normalize.py`, everything
 downstream must be rebuilt from `mine_dicts.py` onward** — dictionaries,
@@ -121,35 +140,9 @@ nothing already-submitted (LB 0.92) is invalidated.
 
 ## What "just run it" means right now
 
-Rebuild order after the 2026-09-26 bug fixes above (full sequence, not the
-shortcut): `mine_dicts.py` → `normalize.py` → `blocking.py` →
-`features_candidates.py train` → `features_candidates.py test` → new
-trainfull-blocking pass for the n_competitors fix → `train_model.py`. See
-"Exact resume sequence" below for the commands; expect several hours total
-on this machine (see timing table) — print/confirm the estimate before
-starting per the standing rule.
-
-If the background run from this session finished cleanly (check
-`output/BLOCKING_REPORT_v2_trainonly.md` mtime and look for a completed
-`blocking.py` process), the very next steps are:
-
-```bash
-cd student_resource
-.venv/Scripts/python.exe code/business_entity_resolution/src/features_candidates.py train
-.venv/Scripts/python.exe code/business_entity_resolution/src/features_candidates.py test
-.venv/Scripts/python.exe code/business_entity_resolution/src/train_model.py
-```
-(~16 min, ~100 min, ~60 min respectively — see timing table below.) That
-gets you a new checkpoint submission (C1 in the Step 3 plan). **If the
-background run did NOT finish** (check for a Python traceback in whatever
-log it was writing to, or just that `data/norm/*.parquet` files look stale),
-rerun `normalize.py` then `blocking.py` first — see "Exact resume
-sequence" below.
-
-After that checkpoint, there is real unfinished work (not just running
-things) — Track A3, C2, C3, C4, D, and most of Track E from the Step 3 plan
-below were not attempted this session due to time. Be honest with the user
-about this; don't silently skip and claim done.
+Run `python code/business_entity_resolution/run_pipeline.py` (with the
+venv's python). It skips ingest/folds when their outputs exist and runs the
+rest in order; after a failure it prints the exact `--from <step>` to resume.
 
 ## Project facts (don't re-derive these)
 
@@ -225,26 +218,10 @@ things have gone wrong on this machine.
 ## Exact resume sequence (from a cold start, e.g. new machine)
 
 ```bash
-cd student_resource
-python -m venv .venv
-.venv/Scripts/python.exe -m pip install -r code/business_entity_resolution/requirements.txt
-
-.venv/Scripts/python.exe code/business_entity_resolution/src/ingest.py
-.venv/Scripts/python.exe code/business_entity_resolution/src/folds.py
-.venv/Scripts/python.exe code/business_entity_resolution/src/evaluate.py   # unit tests, should all PASS
-.venv/Scripts/python.exe code/business_entity_resolution/src/mine_dicts.py
-.venv/Scripts/python.exe code/business_entity_resolution/src/normalize.py
-.venv/Scripts/python.exe code/business_entity_resolution/src/blocking.py   # ~90 min; pass "train-only" as arg to skip Part F for a cheap check
-.venv/Scripts/python.exe code/business_entity_resolution/src/blocking.py trainfull   # NEW, ~90-115 min: bug #4 fix, full 2.2M train S1 competitor counts
-.venv/Scripts/python.exe code/business_entity_resolution/src/features.py
-.venv/Scripts/python.exe code/business_entity_resolution/src/features_candidates.py train
-.venv/Scripts/python.exe code/business_entity_resolution/src/features_candidates.py patch-competitors   # NEW, ~1-2 min: joins in the trainfull fix
-.venv/Scripts/python.exe code/business_entity_resolution/src/features_candidates.py test
-.venv/Scripts/python.exe code/business_entity_resolution/src/train_model.py
-.venv/Scripts/python.exe code/business_entity_resolution/src/oof_report.py  # optional, for the worst-20 report
-
-python utils/validate_submission.py --matching output/matching_results.tsv \
-    --candidate output/candidate_pairs.tsv --test-dir dataset/test
+git clone https://github.com/ayhm23/student_resource && cd student_resource
+# copy the challenge dataset/ folder (train/ + test/ TSVs) here
+bash setup_ubuntu.sh                  # Linux; on Windows see code/business_entity_resolution/README.md
+.venv/bin/python code/business_entity_resolution/run_pipeline.py
 ```
 
 ## What's DONE vs NOT STARTED in the Step 3 plan
