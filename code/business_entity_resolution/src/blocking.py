@@ -631,6 +631,12 @@ def measure_recall(con):
         CREATE OR REPLACE VIEW v_train_S1_sample_norm AS
         SELECT n.* FROM v_train_S1_norm n JOIN '{sample_path}' s ON n.id = s.id
     """)
+    # Warehouses from the pre-v3 pipeline hold these names as TABLES.
+    for name in ("trainsample_scored", "trainsample_pairs_raw"):
+        kind = con.execute("SELECT table_type FROM information_schema.tables WHERE table_name = ?",
+                           [name]).fetchone()
+        if kind and kind[0] == "BASE TABLE":
+            con.execute(f"DROP TABLE {name}")
     con.execute(f"CREATE OR REPLACE VIEW trainsample_scored AS SELECT * FROM train_scored WHERE {SAMPLE_FILTER}")
     con.execute("CREATE OR REPLACE VIEW trainsample_pairs_raw AS SELECT * FROM train_pairs_raw")
     n_sample = con.execute("SELECT count(*) FROM v_train_S1_sample_norm").fetchone()[0]
@@ -840,11 +846,12 @@ def main():
     CLI arg (optional):
       train-only  -- train candidates + recall report only (cheap check of a blocking change)
       test-only   -- test candidates only (resume after a finished train pass)
+      recall-only -- recall report from existing train candidates (resume after a crash in the report)
     """
     arg = sys.argv[1] if len(sys.argv) > 1 else ""
-    if arg not in ("", "train-only", "test-only"):
-        raise SystemExit(f"unknown arg {arg!r}; expected nothing, 'train-only' or 'test-only'")
-    do_train, do_test = arg != "test-only", arg != "train-only"
+    if arg not in ("", "train-only", "test-only", "recall-only"):
+        raise SystemExit(f"unknown arg {arg!r}; expected nothing, 'train-only', 'test-only' or 'recall-only'")
+    do_train, do_test = arg not in ("test-only",), arg in ("", "test-only")
 
     print_sysinfo()
     print(f"[blocking] caps default={CAP_DEFAULT} strict={CAP_K2_NOSTATE}, top_k={TOP_K_PER_S1}, "
@@ -853,8 +860,12 @@ def main():
     report = []
 
     if do_train:
-        prepare_split(con, "train")
-        build_train_candidates(con)
+        if arg == "recall-only":
+            for source in ("S1", "S2", "S3"):
+                norm_view(con, "train", source)
+        else:
+            prepare_split(con, "train")
+            build_train_candidates(con)
         report.append("=== Part E: recall on the 300k train S1 sample (candidates from all-train-S1 blocking) ===")
         e_lines, _ = measure_recall(con)
         report.extend(e_lines)
