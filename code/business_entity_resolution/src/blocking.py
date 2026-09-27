@@ -828,6 +828,39 @@ def write_test_candidates(con):
     return lines
 
 
+def merge_dense_candidates(con, split, dense_top_k):
+    """Union the transformer (dense) candidates into ``{split}_scored`` (see dense.py).
+
+    Key candidates keep their blocking stats; dense-only candidates get
+    n_keys_hit = 0 / cheap_score = 0 / rank_in_s1 = NULL. Every row gets
+    dense_cos / dense_rank (NULL when the pair is not in the S1's dense
+    top-K). Idempotent: the key-only table is kept as ``{split}_scored_keys``.
+    """
+    path = CAND_DIR / f"dense_{split}.parquet"
+    if not path.exists():
+        return False
+    exists = con.execute("SELECT count(*) FROM information_schema.tables WHERE table_name = ?",
+                         [f"{split}_scored_keys"]).fetchone()[0]
+    if not exists:
+        con.execute(f"ALTER TABLE {split}_scored RENAME TO {split}_scored_keys")
+    con.execute(f"""
+        CREATE OR REPLACE TABLE {split}_scored AS
+        WITH d AS (SELECT s1_id, match_id, match_source, dense_cos, dense_rank
+                   FROM '{path.as_posix()}' WHERE dense_rank <= {dense_top_k})
+        SELECT coalesce(k.s1_id, d.s1_id) AS s1_id, coalesce(k.match_id, d.match_id) AS match_id,
+               coalesce(k.match_source, d.match_source) AS match_source,
+               coalesce(k.n_keys_hit, 0) AS n_keys_hit, coalesce(k.cheap_score, 0.0) AS cheap_score,
+               k.rank_in_s1, d.dense_cos, d.dense_rank
+        FROM {split}_scored_keys k
+        FULL OUTER JOIN d ON d.s1_id = k.s1_id AND d.match_id = k.match_id AND d.match_source = k.match_source
+    """)
+    n_keys, n_all = con.execute(f"SELECT (SELECT count(*) FROM {split}_scored_keys), "
+                                f"(SELECT count(*) FROM {split}_scored)").fetchone()
+    print(f"[blocking] {split}: merged dense top-{dense_top_k} -> {n_all} candidates "
+          f"({n_keys} from keys, {n_all - n_keys} dense-only)")
+    return True
+
+
 def prepare_split(con, split):
     """Views, IDF and token tables one split's blocking needs."""
     for source in ("S1", "S2", "S3"):
@@ -849,8 +882,26 @@ def main():
       recall-only -- recall report from existing train candidates (resume after a crash in the report)
     """
     arg = sys.argv[1] if len(sys.argv) > 1 else ""
+    if arg == "merge-dense":
+        dense_k = int(sys.argv[2]) if len(sys.argv) > 2 else 20
+        print_sysinfo()
+        con = connect(role="heavy")
+        for split in ("train", "test"):
+            merge_dense_candidates(con, split, dense_k)
+        sample = TRAIN_SAMPLE_S1_PARQUET.as_posix()
+        n, hit = con.execute(f"""
+            SELECT count(*), count(s.s1_id) FROM '{TRAIN_GT_LONG_PARQUET.as_posix()}' g
+            JOIN '{sample}' x ON x.id = g.s1_id
+            LEFT JOIN train_scored s ON s.s1_id = g.s1_id AND s.match_id = g.match_id
+                                     AND s.match_source = g.match_source""").fetchone()
+        line = f"Recall on the 300k sample after merging dense top-{dense_k}: {hit}/{n} ({100.0 * hit / n:.2f}%)"
+        print(line)
+        (BLOCKING_REPORT_PATH.with_name("BLOCKING_REPORT_dense_merge.md")).write_text(line, encoding="utf-8")
+        con.close()
+        return
     if arg not in ("", "train-only", "test-only", "recall-only"):
-        raise SystemExit(f"unknown arg {arg!r}; expected nothing, 'train-only', 'test-only' or 'recall-only'")
+        raise SystemExit(f"unknown arg {arg!r}; expected nothing, 'train-only', 'test-only', 'recall-only' "
+                         f"or 'merge-dense [k]'")
     do_train, do_test = arg not in ("test-only",), arg in ("", "test-only")
 
     print_sysinfo()

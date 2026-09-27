@@ -65,7 +65,7 @@ NUMERIC_FEATURES = [
     "addr_token_set_ratio", "addr_token_sort_ratio", "addr_num_jaccard", "addr_num_max_equal",
     "addr_num_shared_count", "addr_num_near_match", "addr_idf_jaccard", "other_addr_empty",
     "n_keys_hit", "cheap_score", "rank_in_s1", "n_candidates_for_s1",
-    "n_competitors", "rank_among_competitors",
+    "n_competitors", "rank_among_competitors", "dense_cos", "dense_rank",
 ]
 # Fixed integer codes, identical for train and test.
 CATEGORICAL_CODES = {
@@ -623,9 +623,27 @@ def _git_commit():
         return ""
 
 
+def restrict_features_to_available():
+    """Drop feature names the feature parquets don't have (e.g. dense_* when the GPU channel didn't run)."""
+    global NUMERIC_FEATURES, STAGE1_FEATURES, STAGE2_FEATURES
+    have = set(pq.read_schema(TRAIN_FEATS).names) & set(pq.read_schema(TEST_FEATS).names)
+    have_all_null = set()
+    for c in ("dense_cos", "dense_rank"):
+        if c in have and pq.ParquetFile(TRAIN_FEATS).metadata.row_group(0).column(
+                pq.read_schema(TRAIN_FEATS).names.index(c)).statistics.null_count ==                 pq.ParquetFile(TRAIN_FEATS).metadata.row_group(0).num_rows:
+            have_all_null.add(c)
+    drop = [c for c in NUMERIC_FEATURES if c not in have or c in have_all_null]
+    if drop:
+        print(f"[train_model] not using features {drop} (absent or all-null in the feature files)")
+    NUMERIC_FEATURES = [c for c in NUMERIC_FEATURES if c not in drop]
+    STAGE1_FEATURES = NUMERIC_FEATURES + CATEGORICAL_FEATURES
+    STAGE2_FEATURES = STAGE1_FEATURES + STAGE2_EXTRA
+
+
 def main():
     """Train both stages, tune the decision rule, predict test, write + validate the submission."""
     print_sysinfo()
+    restrict_features_to_available()
     prof = profile()
     con = connect(role="light")
 

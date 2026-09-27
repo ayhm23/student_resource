@@ -1,0 +1,21 @@
+# Optional GPU venv (.venv-gpu) for the transformer retrieval channel (src/dense.py).
+# Kept separate from requirements.txt so torch never changes the main pipeline's pins.
+# Install torch first from the CUDA index that matches your driver, e.g.:
+#   .venv-gpu/bin/python -m pip install torch==2.14.0 --index-url https://download.pytorch.org/whl/cu126
+# then:  .venv-gpu/bin/python -m pip install -r code/business_entity_resolution/requirements-gpu.txt
+# Licenses: torch BSD-3, sentence-transformers/transformers/datasets/accelerate Apache-2.0, faiss MIT.
+sentence-transformers==6.1.0
+transformers==5.17.0
+tokenizers==0.23.2
+safetensors==0.8.0
+datasets==5.0.1
+accelerate==1.15.0
+faiss-cpu==1.15.1
+numpy==2.2.6
+pandas==2.3.3
+pyarrow==25.0.1
+duckdb==1.5.5
+psutil==7.2.2
+RapidFuzz==3.14.5
+Unidecode==1.4.0
+scikit-learn==1.7.2

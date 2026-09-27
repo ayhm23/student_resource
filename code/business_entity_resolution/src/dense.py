@@ -32,17 +32,20 @@ import duckdb
 import numpy as np
 import pandas as pd
 
-from config import CAND_DIR, DATA_DIR, FEATURES_DIR, RAW_DIR, TRAIN_GT_LONG_PARQUET, TRAIN_SAMPLE_S1_PARQUET, raw_parquet_path
+from config import CAND_DIR, DATA_DIR, FEATURES_DIR, TRAIN_GT_LONG_PARQUET, TRAIN_SAMPLE_S1_PARQUET, raw_parquet_path
 from perf import fmt_hms, progress_line
+from resources import default_scratch_dir
 
 sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
 
 BASE_MODEL = os.environ.get("BER_DENSE_MODEL", "intfloat/multilingual-e5-small")
 DENSE_DIR = DATA_DIR / "dense"
 MODEL_DIR = DATA_DIR / "models" / "dense_encoder"
+SCRATCH_DIR = default_scratch_dir()
 MAX_SEQ_LEN = 64
 PREFIX = "query: "  # e5 convention for symmetric similarity
 TOP_K = int(os.environ.get("BER_DENSE_TOPK", "30"))
+MINI_BATCH = int(os.environ.get("BER_DENSE_MINI_BATCH", "32"))
 
 
 def record_text_sql(alias="r"):
@@ -67,20 +70,25 @@ def build_training_triplets(n_pairs, seed=42):
     s1 = raw_parquet_path("train", "S1").as_posix()
     s2 = raw_parquet_path("train", "S2").as_posix()
     s3 = raw_parquet_path("train", "S3").as_posix()
-    feats = (FEATURES_DIR / "train_candidates_features.parquet").as_posix()
+    gt = TRAIN_GT_LONG_PARQUET.as_posix()
     con.execute(f"SELECT setseed({(seed % 100) / 100})")
     con.execute(f"""
         CREATE TEMP TABLE pairs AS
-        SELECT s1_id, match_id, match_source FROM '{TRAIN_GT_LONG_PARQUET.as_posix()}'
+        SELECT s1_id, match_id, match_source FROM '{gt}'
         USING SAMPLE reservoir({n_pairs} ROWS) REPEATABLE ({seed})
     """)
+    # Hard negatives = the S1's highest cheap-score blocking candidate that is not
+    # a true match (the planted look-alikes). Read from the blocking warehouse, so
+    # this step only needs blocking to have run (not featurization).
+    con.execute(f"ATTACH '{(SCRATCH_DIR / 'warehouse.duckdb').as_posix()}' AS wh (READ_ONLY)")
     con.execute(f"""
         CREATE TEMP TABLE hardneg AS
-        SELECT s1_id, match_id AS neg_id, other_source AS neg_source FROM (
-            SELECT f.s1_id, f.match_id, f.other_source,
-                   row_number() OVER (PARTITION BY f.s1_id ORDER BY f.cheap_score DESC, f.match_id) AS rn
-            FROM '{feats}' f
-            WHERE f.label = 0 AND f.s1_id IN (SELECT DISTINCT s1_id FROM pairs)
+        SELECT s1_id, match_id AS neg_id, match_source AS neg_source FROM (
+            SELECT c.s1_id, c.match_id, c.match_source,
+                   row_number() OVER (PARTITION BY c.s1_id ORDER BY c.cheap_score DESC, c.match_id) AS rn
+            FROM wh.train_scored c
+            ANTI JOIN '{gt}' g ON g.s1_id = c.s1_id AND g.match_id = c.match_id AND g.match_source = c.match_source
+            WHERE c.s1_id IN (SELECT DISTINCT s1_id FROM pairs)
         ) WHERE rn = 1
     """)
     con.execute(f"""
@@ -113,7 +121,20 @@ def finetune(n_pairs, epochs, batch_size, lr):
           f"example: {df.iloc[0].to_dict()}")
     model = SentenceTransformer(BASE_MODEL, device="cuda" if torch.cuda.is_available() else "cpu")
     model.max_seq_length = MAX_SEQ_LEN
-    loss = losses.MultipleNegativesRankingLoss(model)
+    # The 250k-token multilingual embedding matrix is most of the parameters; its
+    # AdamW state alone does not fit a 4 GB GPU, and the pretrained token
+    # embeddings are what we want to keep anyway -- fine-tune the transformer layers.
+    frozen = 0
+    for name, p in model.named_parameters():
+        if "word_embeddings" in name:
+            p.requires_grad = False
+            frozen += p.numel()
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"[dense] frozen {frozen / 1e6:.0f}M embedding params, training {trainable / 1e6:.0f}M")
+    # GradCache variant: the full batch's in-batch negatives, computed in small
+    # mini-batches -- a plain MNRL batch filled the 4 GB GPU and the driver
+    # started spilling to system RAM (100% util at half power, 1.5 s/step).
+    loss = losses.CachedMultipleNegativesRankingLoss(model, mini_batch_size=MINI_BATCH)
     args = SentenceTransformerTrainingArguments(
         output_dir=str(DATA_DIR / "models" / "dense_ckpt"), num_train_epochs=epochs,
         per_device_train_batch_size=batch_size, learning_rate=lr, warmup_ratio=0.05,

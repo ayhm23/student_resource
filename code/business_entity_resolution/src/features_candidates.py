@@ -39,7 +39,7 @@ from resources import profile
 sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
 
 BLOCKING_COLS = ["n_keys_hit", "cheap_score", "rank_in_s1", "n_candidates_for_s1",
-                 "n_competitors", "rank_among_competitors"]
+                 "n_competitors", "rank_among_competitors", "dense_cos", "dense_rank"]
 FEATURE_PARQUET = {
     "train": FEATURES_DIR / "train_candidates_features.parquet",
     "test": FEATURES_DIR / "test_candidates_features.parquet",
@@ -57,9 +57,13 @@ def build_competition_table(con, split):
     """``{split}_fc_comp``: blocking + competition features for every candidate, with an S1 chunk id."""
     avg = con.execute(f"SELECT count(*) / greatest(count(DISTINCT s1_id), 1) FROM {split}_scored").fetchone()[0]
     s1_per_chunk = max(1_000, int(profile().duckdb_light_gb * PAIRS_PER_CHUNK_PER_GB / max(avg, 1)))
+    cols = {r[0] for r in con.execute(f"DESCRIBE {split}_scored").fetchall()}
+    # dense_cos / dense_rank exist only after blocking.py merge-dense (transformer channel)
+    dense = ("dense_cos, dense_rank" if "dense_cos" in cols
+             else "CAST(NULL AS FLOAT) AS dense_cos, CAST(NULL AS SMALLINT) AS dense_rank")
     con.execute(f"""
         CREATE OR REPLACE TABLE {split}_fc_comp AS
-        SELECT s1_id, match_id, match_source, n_keys_hit, cheap_score, rank_in_s1,
+        SELECT s1_id, match_id, match_source, n_keys_hit, cheap_score, rank_in_s1, {dense},
                count(*) OVER (PARTITION BY s1_id) AS n_candidates_for_s1,
                count(*) OVER (PARTITION BY match_id, match_source) AS n_competitors,
                row_number() OVER (PARTITION BY match_id, match_source
@@ -94,7 +98,7 @@ def chunk_pairs_sql(con, split, chunk, with_label):
                a.country AS s1_country, b.country AS other_country, {s1_cols}, {o_cols},
                (b.addr_clean = '' AND b.numbers = '')::DOUBLE AS other_addr_empty,
                c.n_keys_hit, c.cheap_score, c.rank_in_s1, c.n_candidates_for_s1,
-               c.n_competitors, c.rank_among_competitors {label_col}
+               c.n_competitors, c.rank_among_competitors, c.dense_cos, c.dense_rank {label_col}
         FROM _c c
         JOIN _a a ON a.id = c.s1_id
         JOIN _b b ON b.id = c.match_id AND b.source = c.match_source

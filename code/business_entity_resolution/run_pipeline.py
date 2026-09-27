@@ -47,6 +47,13 @@ STEPS = [
     ("normalize", "normalize.py", [], 14, None),
     ("blocking_train", "blocking.py", ["train-only"], 90, None),
     ("blocking_test", "blocking.py", ["test-only"], 60, None),
+    # Optional transformer channel (GPU venv; skipped when there is none -- see gpu_python()).
+    ("dense_finetune", "dense.py", ["finetune"], 70, "gpu"),
+    ("dense_encode_train", "dense.py", ["encode", "train"], 90, "gpu"),
+    ("dense_encode_test", "dense.py", ["encode", "test"], 90, "gpu"),
+    ("dense_search_train", "dense.py", ["search", "train"], 20, "gpu"),
+    ("dense_search_test", "dense.py", ["search", "test"], 20, "gpu"),
+    ("merge_dense", "blocking.py", ["merge-dense", "20"], 5, "gpu"),
     ("features_train", "features_candidates.py", ["train"], 80, None),
     ("features_test", "features_candidates.py", ["test"], 65, None),
     ("train_model", "train_model.py", [], 120, None),
@@ -55,16 +62,33 @@ STEPS = [
 STEP_NAMES = [s[0] for s in STEPS]
 
 
+def gpu_python():
+    """Interpreter of the GPU venv (torch + sentence-transformers), or None.
+
+    BER_GPU_PYTHON if set, else .venv-gpu next to the repo root. Kept separate
+    from the main venv so installing torch can never change the main
+    pipeline's pinned numpy/pandas/scikit-learn.
+    """
+    env = os.environ.get("BER_GPU_PYTHON")
+    if env:
+        return env
+    for rel in ("Scripts/python.exe", "bin/python"):
+        p = ROOT / ".venv-gpu" / rel
+        if p.exists():
+            return str(p)
+    return None
+
+
 def write_status(status):
     status["updated"] = datetime.now().isoformat(timespec="seconds")
     STATUS_PATH.write_text(json.dumps(status, indent=2), encoding="utf-8")
 
 
-def run_step(name, script, args):
+def run_step(name, script, args, python=None):
     """Run one step, teeing its output to the console and its log file. Returns the exit code."""
     log_path = LOG_DIR / f"{name}.log"
     env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
-    cmd = [sys.executable, str(SRC / script), *args]
+    cmd = [python or sys.executable, str(SRC / script), *args]
     with open(log_path, "w", encoding="utf-8") as log:
         log.write(f"$ {' '.join(cmd)}\n")
         proc = subprocess.Popen(cmd, cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -83,6 +107,7 @@ def main():
     ap.add_argument("--only", choices=STEP_NAMES, help="run just this step")
     ap.add_argument("--force", action="store_true", help="rerun ingest/folds even if their outputs exist")
     ap.add_argument("--list", action="store_true", help="list the steps and exit")
+    ap.add_argument("--no-dense", action="store_true", help="skip the optional GPU transformer steps")
     opts = ap.parse_args()
     sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
 
@@ -113,7 +138,19 @@ def main():
 
     t_run = time.perf_counter()
     done_weight = 0
+    gpu = gpu_python()
     for i, (name, script, args, weight, outputs) in enumerate(steps, 1):
+        python = None
+        if outputs == "gpu":
+            if not gpu or opts.no_dense:
+                print(f"[pipeline] STEP_SKIPPED {name} (no GPU venv: create .venv-gpu with "
+                      f"requirements-gpu.txt or set BER_GPU_PYTHON)" if not gpu else
+                      f"[pipeline] STEP_SKIPPED {name} (--no-dense)")
+                status["steps"][name] = {"state": "skipped"}
+                done_weight += weight
+                continue
+            python = gpu if script == "dense.py" else None
+            outputs = None
         if outputs and not opts.force and all(Path(p).exists() for p in outputs):
             print(f"[pipeline] STEP_SKIPPED {name} (outputs exist; --force to rerun)")
             status["steps"][name] = {"state": "skipped"}
@@ -124,7 +161,7 @@ def main():
         write_status(status)
         print(f"[pipeline] STEP_START {name} ({i}/{len(steps)}) -- log: {LOG_DIR / (name + '.log')}")
         t0 = time.perf_counter()
-        code = run_step(name, script, args)
+        code = run_step(name, script, args, python)
         dt = time.perf_counter() - t0
         if code != 0:
             status["steps"][name] = {"state": "failed", "exit_code": code, "seconds": round(dt)}
