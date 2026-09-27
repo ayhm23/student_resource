@@ -21,6 +21,36 @@ HANDOFF.md" — that's enough context to resume without re-deriving anything.
   below). On a bigger machine, things will be much simpler and faster — see
   "If you're now on a better machine" at the bottom.
 
+## Latest (2026-09-27 morning): v3 done, transformer channel proven, v4 run in progress
+
+- **v3 submission** (no transformer): OOF macro F0.5 **0.9504** (US 0.9652,
+  India 0.9281; old v2 was 0.9336 -> LB 0.92), LOCO US->India 0.859,
+  India->US 0.908. Validated PASS, archived in `output/archive/sub3_oof09504/`
+  and is the current `output/matching_results.tsv`. Best rule: per-S1
+  expected-F0.5 optimum on calibrated stage-2 probabilities + exclusivity.
+- **Diagnosis** (`output/LOSS_DIAGNOSIS.md`): of the 0.0496 gap to 1.0,
+  **0.0375 is blocking** (8.4% of true pairs never become candidates; only 75%
+  of S1 with 4-6 true matches get all of them), 0.0121 is model+decision.
+  Precision is already 0.974; recall 0.899 is the problem. No ID leakage in the
+  data (corr(s1_id, match_id) = 0.0001).
+- **Transformer retrieval** (`src/dense.py`, GPU venv `.venv-gpu`,
+  `requirements-gpu.txt`): multilingual-e5-small (118M, MIT) fine-tuned on
+  587k train pairs + hardest blocking non-match, exact GPU top-K search per
+  country. Recall on the 300k sample (`output/DENSE_RECALL.md`): keys 91.67%
+  -> **keys + dense top-20: 99.51%** (top-30 99.63%; India 99.68%). This
+  removes the blocking ceiling that the diagnosis identified.
+- **v4 run** (in progress when this was written): encode/search all train+test
+  -> `blocking.py merge-dense 20` -> features (adds `dense_cos`/`dense_rank`)
+  -> two-stage model -> submission. Resume with
+  `run_pipeline.py --from merge_dense` once `data/cand/dense_{train,test}.parquet`
+  exist. `run_pipeline.py` runs the GPU steps automatically when `.venv-gpu`
+  exists (skip with `--no-dense`).
+- Laptop gotchas fixed tonight: DuckDB threads sized from its memory (~1 GB per
+  thread), DuckDB caps floored at a fraction of total RAM, S2/S3 key build
+  chunked, TSV writers streamed, prediction cascade (1 model, 5-model average
+  only above p=0.005, identical where it matters, ~5x faster), GPU fine-tune
+  with CachedMNRL (plain MNRL overflowed 4 GB VRAM into system RAM).
+
 ## Current state (2026-09-26 evening): v3 pipeline, full rerun
 
 All items from the pasted lab-machine report are now implemented (not just the
