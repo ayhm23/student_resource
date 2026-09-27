@@ -557,22 +557,44 @@ def run_loco(full, X, keys, y, training_s1, gt):
 
 def write_id_tsv(con, pairs_table, path, header_col, order_col):
     """One row per test S1 (all of them) with ids aggregated from a (s1_id, match_id, src) table."""
+    # Streamed: pairs sorted by S1 are grouped in Python as they arrive. A
+    # DuckDB string_agg over tens of millions of ids needed several GB and
+    # crashed the laptop run; this stays flat regardless of size.
     s1_path = raw_parquet_path("test", "S1").as_posix()
-    result = con.execute(f"""
-        SELECT s.id, coalesce(string_agg(
-                   CASE c.src WHEN 1 THEN 'S3-' ELSE 'S2-' END || CAST(c.match_id AS VARCHAR), ','
-                   ORDER BY c.{order_col}), '') AS ids
-        FROM '{s1_path}' s LEFT JOIN {pairs_table} c ON c.s1_id = s.id
-        GROUP BY s.id ORDER BY s.id
-    """)
-    n = 0
+    all_s1 = np.sort(con.execute(f"SELECT id FROM '{s1_path}'").fetchnumpy()["id"])
+    result = con.execute(f"SELECT s1_id, src, match_id FROM {pairs_table} ORDER BY s1_id, {order_col}")
+    n, pos = 0, 0
+    cur, items = None, []
     with open(path, "w", newline="\n", encoding="utf-8") as fh:
         fh.write(f"source1_entity_id\t{header_col}\n")
-        for batch in result.to_arrow_reader(500_000):
-            ids = batch.column("id").to_numpy()
-            lists = batch.column("ids").to_pylist()
-            fh.write("".join(f"S1-{i}\t{l}\n" for i, l in zip(ids, lists)))
-            n += len(ids)
+
+        def emit_until(s1):
+            nonlocal pos, n
+            while pos < len(all_s1) and all_s1[pos] < s1:
+                fh.write(f"S1-{all_s1[pos]}\t\n")
+                pos += 1
+                n += 1
+
+        def flush():
+            nonlocal pos, n
+            emit_until(cur)
+            fh.write(f"S1-{cur}\t{','.join(items)}\n")
+            pos += 1
+            n += 1
+
+        for batch in result.to_arrow_reader(1_000_000):
+            s1s = batch.column("s1_id").to_numpy()
+            srcs = batch.column("src").to_numpy()
+            mids = batch.column("match_id").to_numpy()
+            for s1, s, m in zip(s1s.tolist(), srcs.tolist(), mids.tolist()):
+                if s1 != cur:
+                    if cur is not None:
+                        flush()
+                    cur, items = s1, []
+                items.append(f"{'S3' if s == 1 else 'S2'}-{m}")
+        if cur is not None:
+            flush()
+        emit_until(np.iinfo(np.int64).max)
     print(f"Wrote {path} ({n} rows)")
 
 
@@ -695,6 +717,9 @@ def main():
               f"({len(test)} of {n_test} candidate pairs above the {CANDIDATE_FLOOR} floor)")
 
     with stage("write + validate submission"):
+        # Aggregating 55M candidate ids per S1 needs more than the light budget.
+        con.execute(f"SET memory_limit='{prof.duckdb_heavy_gb}GB'")
+        con.execute(f"SET threads={prof.duckdb_threads_heavy}")
         con.register("_preds", preds)
         con.execute("CREATE OR REPLACE TABLE test_predictions AS SELECT * FROM _preds")
         con.unregister("_preds")
