@@ -21,9 +21,34 @@ HANDOFF.md" — that's enough context to resume without re-deriving anything.
   below). On a bigger machine, things will be much simpler and faster — see
   "If you're now on a better machine" at the bottom.
 
-## Latest (2026-09-27 morning): v3 done, transformer channel proven, v4 run in progress
+## Latest (2026-09-27 ~10:00 IST): v3 = LB 0.94; v4 (transformer) proven but NOT run end-to-end
 
-- **v3 submission** (no transformer): OOF macro F0.5 **0.9504** (US 0.9652,
+**Work on the laptop stopped here by request.** The v4 run was interrupted
+during the train dense search (India done, US not). Nothing below `data/` is
+in git (gitignored, tens of GB), so on a new machine:
+
+```bash
+git clone https://github.com/ayhm23/student_resource && cd student_resource
+# copy dataset/ (train/ + test/ TSVs) here
+bash setup_ubuntu.sh                                   # main venv
+python3 -m venv .venv-gpu                              # GPU venv (needs an NVIDIA GPU)
+.venv-gpu/bin/python -m pip install torch --index-url https://download.pytorch.org/whl/cu126
+.venv-gpu/bin/python -m pip install -r code/business_entity_resolution/requirements-gpu.txt
+tmux new -s ber
+.venv/bin/python code/business_entity_resolution/run_pipeline.py    # full v4, GPU steps included
+```
+
+The fine-tuned encoder (`data/models/dense_encoder`) is not in git either;
+the `dense_finetune` step retrains it (~1h on a 4 GB laptop GPU, much less on
+a real one). On a bigger GPU also try `BER_DENSE_TOPK=30` + `merge-dense 30`
+(99.63% recall) and a larger encoder via `BER_DENSE_MODEL`.
+
+Next levers after v4, in order: (1) v4 as-is (candidate recall 91.7% ->
+99.5%, the gap the diagnosis blamed); (2) cross-encoder rerank of ambiguous
+pairs; (3) France check (LB is ~0.01 below OOF both times -- France is the
+only test country without training data).
+
+- **v3 submission** (no transformer): **public LB 0.94**, OOF macro F0.5 **0.9504** (US 0.9652,
   India 0.9281; old v2 was 0.9336 -> LB 0.92), LOCO US->India 0.859,
   India->US 0.908. Validated PASS, archived in `output/archive/sub3_oof09504/`
   and is the current `output/matching_results.tsv`. Best rule: per-S1
